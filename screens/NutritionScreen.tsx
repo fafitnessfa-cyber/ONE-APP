@@ -10,7 +10,6 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Circle } from 'react-native-svg';
 import { AppScreen } from '../components/AppScreen';
-import { LogoMark, LogoWordmark } from '../components/BrandLogo';
 import { createNutritionDaysState } from '../data/nutrition';
 import {
   NutritionDay,
@@ -149,32 +148,6 @@ function updateMeal(
     ...day,
     meals: day.meals.map((meal) => (meal.id === mealId ? updater(meal) : meal)),
   };
-}
-
-function NutritionHeader() {
-  return (
-    <View style={styles.header}>
-      <View style={styles.headerBrand}>
-        <LogoMark height={30} width={28} />
-        <LogoWordmark height={18} width={128} />
-      </View>
-
-      <View style={styles.headerActions}>
-        <View style={styles.headerIcon}>
-          <Ionicons
-            name="notifications-outline"
-            size={22}
-            color={colors.textSecondary}
-          />
-        </View>
-        <View style={styles.avatar}>
-          <Text allowFontScaling={false} style={styles.avatarText}>
-            U
-          </Text>
-        </View>
-      </View>
-    </View>
-  );
 }
 
 function CalorieRing({
@@ -497,13 +470,11 @@ export function NutritionScreen() {
   };
 
   return (
-    <AppScreen showHeader={false}>
+    <AppScreen>
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
       >
-        <NutritionHeader />
-
         <View style={styles.dayTabs}>
           {DAY_TABS.map((tab) => {
             const isActive = tab.id === selectedDayId;
@@ -720,43 +691,6 @@ const styles = StyleSheet.create({
   scrollContent: {
     gap: spacing.md,
     paddingBottom: 170,
-  },
-  header: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: spacing.xs,
-  },
-  headerBrand: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.xs,
-  },
-  headerActions: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.md,
-  },
-  headerIcon: {
-    alignItems: 'center',
-    height: 34,
-    justifyContent: 'center',
-    width: 34,
-  },
-  avatar: {
-    alignItems: 'center',
-    backgroundColor: '#7C6348',
-    borderColor: colors.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    height: 36,
-    justifyContent: 'center',
-    width: 36,
-  },
-  avatarText: {
-    color: colors.textPrimary,
-    fontSize: fontSize.body,
-    fontWeight: '900',
   },
   dayTabs: {
     flexDirection: 'row',
