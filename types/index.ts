@@ -16,8 +16,16 @@ export interface FilterTag {
 }
 
 export type NutritionDayId = 'yesterday' | 'today' | 'tomorrow';
+export type NutritionMealId = 'breakfast' | 'lunch' | 'dinner' | 'snacks';
 
 export type NutritionMacroKey = 'protein' | 'carbs' | 'fats';
+export type NutritionFoodSource = 'usda' | 'nutritionix' | 'saved' | 'recipe';
+export type NutritionLogSource =
+  | 'search'
+  | 'barcode'
+  | 'saved'
+  | 'recipe'
+  | 'suggested';
 
 export interface NutritionMacroGoals {
   protein: number;
@@ -28,30 +36,38 @@ export interface NutritionMacroGoals {
 export interface NutritionFoodTemplate {
   id: string;
   name: string;
+  brand?: string;
+  servingLabel: string;
   caloriesPerServing: number;
   proteinPerServing: number;
   carbsPerServing: number;
   fatsPerServing: number;
+  fiberPerServing?: number;
+  sodiumMgPerServing?: number;
   defaultServings: number;
+  source: NutritionFoodSource;
+  keywords: string[];
+  suggestedMealIds?: NutritionMealId[];
 }
 
-export interface NutritionFoodItem {
+export interface NutritionCatalogItem extends NutritionFoodTemplate {}
+
+export interface NutritionFoodItem
+  extends Omit<
+    NutritionFoodTemplate,
+    'id' | 'defaultServings' | 'keywords' | 'suggestedMealIds'
+  > {
   id: string;
-  name: string;
-  caloriesPerServing: number;
-  proteinPerServing: number;
-  carbsPerServing: number;
-  fatsPerServing: number;
+  catalogItemId: string;
   servings: number;
+  loggedFrom: NutritionLogSource;
 }
 
 export interface NutritionMeal {
-  id: string;
+  id: NutritionMealId;
   label: string;
   targetCalories: number;
   items: NutritionFoodItem[];
-  quickAddOptions: NutritionFoodTemplate[];
-  nextQuickAddIndex: number;
 }
 
 export interface NutritionDay {
