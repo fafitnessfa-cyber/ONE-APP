@@ -1,6 +1,7 @@
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Href, useRouter } from 'expo-router';
 import Svg, { Circle, Line } from 'react-native-svg';
 import { AppScreen } from '../components/AppScreen';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
@@ -16,16 +17,19 @@ const quickTools = [
   {
     icon: 'body',
     title: 'Muscle\nExplorer',
+    href: '/home/muscle-explorer',
   },
   {
     icon: 'camera',
     title: 'Scan Meal',
+    href: '/home/scan-meal',
   },
   {
     icon: 'videocam',
     title: 'Watch Form\nGuide',
+    href: '/home/form-guide',
   },
-];
+] as const;
 
 const recoveryMarkers = [
   { label: 'Chest - Partial', status: 'partial' },
@@ -34,6 +38,7 @@ const recoveryMarkers = [
 ];
 
 export function HomeScreen() {
+  const router = useRouter();
   const [activeTool, setActiveTool] = React.useState('Muscle\nExplorer');
 
   return (
@@ -86,7 +91,11 @@ export function HomeScreen() {
             <Text style={styles.aiText}>AI adjusted weight <Text style={styles.greenText}>+2.5kg</Text> based on your last session.</Text>
           </View>
 
-          <Pressable style={styles.primaryButton} accessibilityRole="button">
+          <Pressable
+            style={styles.primaryButton}
+            onPress={() => router.push('/home/todays-workout' as Href)}
+            accessibilityRole="button"
+          >
             <Text style={styles.primaryButtonText}>Start Workout</Text>
           </Pressable>
         </View>
@@ -98,7 +107,10 @@ export function HomeScreen() {
               <Pressable
                 key={tool.title}
                 style={[styles.quickCard, isActive && styles.quickCardActive]}
-                onPress={() => setActiveTool(tool.title)}
+                onPress={() => {
+                  setActiveTool(tool.title);
+                  router.push(tool.href as Href);
+                }}
                 accessibilityRole="button"
               >
                 <View style={styles.quickIconWrap}>
@@ -134,8 +146,12 @@ export function HomeScreen() {
                 <Text style={styles.markerLabel}>{marker.label}</Text>
               </View>
             ))}
-            <Pressable style={styles.muscleExplorerLink} accessibilityRole="button">
-              <Text style={styles.linkText}>View Muscle Explorer</Text>
+            <Pressable
+              style={styles.muscleExplorerLink}
+              onPress={() => router.push('/home/recovery-map' as Href)}
+              accessibilityRole="button"
+            >
+              <Text style={styles.linkText}>View Recovery Map</Text>
               <Ionicons name="chevron-forward" size={10} color={colors.accent} />
             </Pressable>
           </View>

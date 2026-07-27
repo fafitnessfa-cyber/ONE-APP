@@ -1,6 +1,7 @@
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Href, useRouter } from 'expo-router';
 import Svg, { Circle, Line } from 'react-native-svg';
 import { AppScreen } from '../components/AppScreen';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
@@ -54,6 +55,7 @@ const leaders = [
 ];
 
 export function ChallengesScreen() {
+  const router = useRouter();
   const [selectedChallenge, setSelectedChallenge] = React.useState(challengeCards[0].title);
   const [challengeFilter, setChallengeFilter] = React.useState<ChallengeFilter>('All');
   const [showStore, setShowStore] = React.useState(false);
@@ -94,12 +96,26 @@ export function ChallengesScreen() {
         </View>
 
         <View style={styles.currencyRow}>
-          <CurrencyPill icon="logo-usd" label="FITCOINS" value="756" />
-          <CurrencyPill icon="ribbon" label="BADGES" value="25" />
+          <CurrencyPill
+            icon="logo-usd"
+            label="FITCOINS"
+            value="756"
+            onPress={() => router.push('/challenges/fitcoin-store' as Href)}
+          />
+          <CurrencyPill
+            icon="ribbon"
+            label="BADGES"
+            value="25"
+            onPress={() => router.push('/challenges/badges' as Href)}
+          />
         </View>
 
         <View style={styles.challengeSection}>
-          <SectionHeader icon="trophy" title="On Going Challenges" />
+          <SectionHeader
+            icon="trophy"
+            title="On Going Challenges"
+            onPress={() => router.push('/challenges/challenge-detail' as Href)}
+          />
 
           <View style={styles.filterRow}>
             {challengeFilters.map((filter) => {
@@ -139,7 +155,11 @@ export function ChallengesScreen() {
             </View>
             <View style={styles.featuredFooter}>
               <Text style={styles.featuredMeta}>{selectedChallengeData.daysLeft} · {selectedChallengeData.difficulty}</Text>
-              <Pressable style={styles.continueButton} accessibilityRole="button">
+              <Pressable
+                style={styles.continueButton}
+                onPress={() => router.push('/challenges/challenge-detail' as Href)}
+                accessibilityRole="button"
+              >
                 <Text style={styles.continueButtonText}>Continue</Text>
               </Pressable>
             </View>
@@ -191,15 +211,19 @@ export function ChallengesScreen() {
 
           <Pressable
             style={[styles.storeButton, showStore && styles.storeButtonActive]}
-            onPress={() => setShowStore((value) => !value)}
+            onPress={() => router.push('/challenges/fitcoin-store' as Href)}
             accessibilityRole="button"
           >
-            <Text style={styles.storeButtonText}>{showStore ? 'FIT STORE READY' : 'BROWSE FIT STORE'}</Text>
+            <Text style={styles.storeButtonText}>BROWSE FIT STORE</Text>
           </Pressable>
         </View>
 
         <View style={styles.leaderboardCard}>
-          <SectionHeader icon="podium" title="Community Leaderboards" />
+          <SectionHeader
+            icon="podium"
+            title="Community Leaderboards"
+            onPress={() => router.push('/challenges/leaderboards' as Href)}
+          />
           <View style={styles.leadersRow}>
             {leaders.map((leader) => {
               const isFirst = leader.rank === 1;
@@ -268,26 +292,54 @@ function LevelRing() {
   );
 }
 
-function CurrencyPill({ icon, label, value }: { icon: keyof typeof Ionicons.glyphMap; label: string; value: string }) {
+function CurrencyPill({
+  icon,
+  label,
+  value,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  value: string;
+  onPress?: () => void;
+}) {
   return (
-    <View style={styles.currencyPill}>
+    <Pressable
+      style={({ pressed }) => [styles.currencyPill, pressed && styles.pressed]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${label}`}
+    >
       <View style={styles.currencyIcon}>
         <Ionicons name={icon} size={22} color={colors.background} />
       </View>
       <Text style={styles.currencyLabel}>{label}: <Text style={styles.currencyValue}>{value}</Text></Text>
-    </View>
+    </Pressable>
   );
 }
 
-function SectionHeader({ icon, title }: { icon: keyof typeof Ionicons.glyphMap; title: string }) {
+function SectionHeader({
+  icon,
+  title,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+  onPress?: () => void;
+}) {
   return (
-    <View style={styles.sectionHeader}>
+    <Pressable
+      style={({ pressed }) => [styles.sectionHeader, pressed && styles.pressed]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${title}`}
+    >
       <View style={styles.sectionTitleRow}>
         <Ionicons name={icon} size={20} color={colors.accent} />
         <Text style={styles.sectionTitle}>{title}</Text>
       </View>
       <Ionicons name="chevron-forward" size={24} color={colors.accent} />
-    </View>
+    </Pressable>
   );
 }
 
@@ -725,5 +777,8 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 9,
     textAlign: 'center',
+  },
+  pressed: {
+    opacity: 0.72,
   },
 });

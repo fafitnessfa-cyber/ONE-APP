@@ -1,6 +1,7 @@
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Href, useRouter } from 'expo-router';
 import Svg, { Circle, Line } from 'react-native-svg';
 import { AppScreen } from '../components/AppScreen';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
@@ -36,6 +37,7 @@ const achievements = [
 ];
 
 export function ProgressScreen() {
+  const router = useRouter();
   const [range, setRange] = React.useState<ActivityRange>('week');
   const [selectedIndex, setSelectedIndex] = React.useState(3);
   const [bodyFocus, setBodyFocus] = React.useState<BodyFocus>('primary');
@@ -87,14 +89,28 @@ export function ProgressScreen() {
 
         <View style={styles.activityCard}>
           <View style={styles.sectionHeader}>
-            <View style={styles.sectionTitleRow}>
+            <Pressable
+              style={styles.sectionTitleRow}
+              onPress={() => router.push('/progress/activity' as Href)}
+              accessibilityRole="button"
+            >
               <Ionicons name="bar-chart" size={18} color={colors.accent} />
               <Text style={styles.sectionTitle}>Weekly Activity</Text>
-            </View>
-            <Pressable style={styles.rangePill} onPress={toggleRange}>
-              <Text style={styles.rangeText}>{range === 'week' ? 'This Week' : 'This Month'}</Text>
-              <Ionicons name="chevron-down" size={12} color={colors.accent} />
             </Pressable>
+            <View style={styles.sectionHeaderActions}>
+              <Pressable style={styles.rangePill} onPress={toggleRange}>
+                <Text style={styles.rangeText}>{range === 'week' ? 'This Week' : 'This Month'}</Text>
+                <Ionicons name="chevron-down" size={12} color={colors.accent} />
+              </Pressable>
+              <Pressable
+                style={styles.detailIconButton}
+                onPress={() => router.push('/progress/activity' as Href)}
+                accessibilityRole="button"
+                accessibilityLabel="Open weekly activity details"
+              >
+                <Ionicons name="chevron-forward" size={15} color={colors.accent} />
+              </Pressable>
+            </View>
           </View>
 
           <View style={styles.chartArea}>
@@ -165,6 +181,7 @@ export function ProgressScreen() {
             value="68.4"
             unit="kg"
             detail="-0.8kg vs week"
+            onPress={() => router.push('/progress/weight' as Href)}
           />
           <ProgressStatCard
             icon="sparkles"
@@ -172,6 +189,7 @@ export function ProgressScreen() {
             value="1820"
             unit=""
             detail="+320 vs last week"
+            onPress={() => router.push('/progress/xp' as Href)}
           />
           <ProgressStatCard
             icon="flame"
@@ -179,6 +197,7 @@ export function ProgressScreen() {
             value="9"
             unit="days"
             detail="Best: 14 days"
+            onPress={() => router.push('/progress/streak' as Href)}
             warning
           />
         </View>
@@ -224,7 +243,7 @@ export function ProgressScreen() {
 
           <Pressable
             style={styles.viewButton}
-            onPress={() => setBodyFocus(bodyFocus === 'primary' ? 'secondary' : 'primary')}
+            onPress={() => router.push('/progress/body-progress' as Href)}
             accessibilityRole="button"
           >
             <Text style={styles.viewButtonText}>View</Text>
@@ -240,12 +259,12 @@ export function ProgressScreen() {
             </View>
             <Pressable
               style={styles.viewAllButton}
-              onPress={() => setShowAllAchievements((current) => !current)}
+              onPress={() => router.push('/progress/achievements' as Href)}
               accessibilityRole="button"
             >
-              <Text style={styles.viewAllText}>{showAllAchievements ? 'Show Less' : 'View All'}</Text>
+              <Text style={styles.viewAllText}>View All</Text>
               <Ionicons
-                name={showAllAchievements ? 'chevron-up' : 'chevron-forward'}
+                name="chevron-forward"
                 size={12}
                 color={colors.accent}
               />
@@ -339,6 +358,7 @@ function ProgressStatCard({
   value,
   unit,
   detail,
+  onPress,
   warning = false,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
@@ -346,10 +366,16 @@ function ProgressStatCard({
   value: string;
   unit: string;
   detail: string;
+  onPress?: () => void;
   warning?: boolean;
 }) {
   return (
-    <View style={styles.statCard}>
+    <Pressable
+      style={({ pressed }) => [styles.statCard, pressed && styles.cardPressed]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${label} details`}
+    >
       <View style={styles.statLabelRow}>
         <Ionicons name={icon} size={15} color={warning ? colors.warning : colors.accent} />
         <Text style={styles.statLabel}>{label}</Text>
@@ -359,7 +385,7 @@ function ProgressStatCard({
         {unit ? <Text style={styles.statUnit}>{unit}</Text> : null}
       </View>
       <Text style={[styles.statDetail, warning && styles.statDetailWarning]}>{detail}</Text>
-    </View>
+    </Pressable>
   );
 }
 
@@ -538,6 +564,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     gap: spacing.md,
+  },
+  sectionHeaderActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  detailIconButton: {
+    alignItems: 'center',
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    height: 32,
+    justifyContent: 'center',
+    width: 32,
   },
   sectionTitleRow: {
     alignItems: 'center',
@@ -727,6 +767,9 @@ const styles = StyleSheet.create({
   },
   statDetailWarning: {
     color: colors.textSecondary,
+  },
+  cardPressed: {
+    opacity: 0.72,
   },
   bodyCard: {
     alignItems: 'center',

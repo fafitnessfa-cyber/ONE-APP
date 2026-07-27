@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import {
   Text,
   FlatList,
@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Href, useLocalSearchParams, useRouter } from 'expo-router';
 import { WebView } from 'react-native-webview';
 import { colors, spacing, fontFamily, radius, fontSize } from '../theme';
 import { exercises as allExercises, filterTags } from '../data/exercises';
@@ -24,6 +25,14 @@ import { SelectionBar } from '../components/SelectionBar';
 const MINUTES_PER_EXERCISE = 10;
 const INITIAL_SET_COUNT = 1;
 const STICKY_COMPLETE_BOTTOM = 124;
+const HOME_PUSH_WORKOUT_ID = 'push-strength-day';
+
+const HOME_PUSH_EXERCISES = [
+  { id: 'barbell-bench-press', setCount: 4, reps: '8', weight: '60' },
+  { id: 'overhead-press', setCount: 3, reps: '10', weight: '32.5' },
+  { id: 'cable-fly', setCount: 3, reps: '12', weight: '15' },
+  { id: 'triceps-pushdown', setCount: 3, reps: '12', weight: '20' },
+] as const;
 
 type SetField = 'reps' | 'weight';
 
@@ -73,13 +82,21 @@ const getTutorialHtml = (exerciseName: string) => {
   `;
 };
 
-const createInitialSets = (exerciseId: string): WorkoutSet[] =>
-  Array.from({ length: INITIAL_SET_COUNT }, (_, index) => ({
+const createSets = (
+  exerciseId: string,
+  count: number,
+  reps: string,
+  weight = '',
+): WorkoutSet[] =>
+  Array.from({ length: count }, (_, index) => ({
     id: `${exerciseId}-set-${index + 1}`,
-    reps: index === 0 ? '12' : '10',
-    weight: '',
+    reps,
+    weight,
     done: false,
   }));
+
+const createInitialSets = (exerciseId: string): WorkoutSet[] =>
+  createSets(exerciseId, INITIAL_SET_COUNT, '12');
 
 const normalizeSetValue = (value: string, field: SetField) => {
   if (field === 'reps') {
@@ -94,10 +111,14 @@ const normalizeSetValue = (value: string, field: SetField) => {
 };
 
 export function WorkoutScreen() {
+  const router = useRouter();
+  const { preset } = useLocalSearchParams<{ preset?: string }>();
+  const startedPresetRef = useRef<string | null>(null);
   const [search, setSearch] = useState('');
   const [activeFilter, setActiveFilter] = useState('all');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activeWorkout, setActiveWorkout] = useState<ActiveExercise[]>([]);
+  const [activeWorkoutTitle, setActiveWorkoutTitle] = useState('Custom Workout');
   const [expandedExerciseIds, setExpandedExerciseIds] = useState<Set<string>>(
     new Set(),
   );
@@ -126,12 +147,51 @@ export function WorkoutScreen() {
     });
   }, [activeFilter, search]);
 
+  useEffect(() => {
+    if (preset !== HOME_PUSH_WORKOUT_ID || startedPresetRef.current === preset) {
+      return;
+    }
+
+    const guidedWorkout = HOME_PUSH_EXERCISES.map((presetExercise) => {
+      const exercise = allExercises.find((item) => item.id === presetExercise.id);
+
+      if (!exercise) {
+        return null;
+      }
+
+      return {
+        exercise,
+        sets: createSets(
+          exercise.id,
+          presetExercise.setCount,
+          presetExercise.reps,
+          presetExercise.weight,
+        ),
+      };
+    }).filter((item): item is ActiveExercise => Boolean(item));
+
+    if (guidedWorkout.length === 0) {
+      return;
+    }
+
+    startedPresetRef.current = preset;
+    setSelectedIds(new Set(guidedWorkout.map((item) => item.exercise.id)));
+    startWorkout(guidedWorkout, 'Push Strength Day');
+  }, [preset]);
+
+
   const toggleExercise = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
+  };
+
+  const startWorkout = (workout: ActiveExercise[], title: string) => {
+    setActiveWorkout(workout);
+    setActiveWorkoutTitle(title);
+    setExpandedExerciseIds(new Set(workout.map((item) => item.exercise.id)));
   };
 
   const handleStart = () => {
@@ -142,21 +202,25 @@ export function WorkoutScreen() {
         sets: createInitialSets(exercise.id),
       }));
 
-    setActiveWorkout(chosen);
-    setExpandedExerciseIds(new Set(chosen.map((item) => item.exercise.id)));
+    startWorkout(chosen, 'Custom Workout');
+  };
+
+  const clearActiveWorkout = () => {
+    startedPresetRef.current = null;
+    setActiveWorkout([]);
+    setActiveWorkoutTitle('Custom Workout');
+    setTutorialExercise(null);
+    setExpandedExerciseIds(new Set());
+    router.replace('/workout' as Href);
   };
 
   const handleBackToSelection = () => {
-    setActiveWorkout([]);
-    setTutorialExercise(null);
-    setExpandedExerciseIds(new Set());
+    clearActiveWorkout();
   };
 
   const handleCompleteWorkout = () => {
-    setActiveWorkout([]);
+    clearActiveWorkout();
     setSelectedIds(new Set());
-    setTutorialExercise(null);
-    setExpandedExerciseIds(new Set());
   };
 
   const handleToggleExerciseSets = (exerciseId: string) => {
@@ -319,6 +383,9 @@ export function WorkoutScreen() {
               ACTIVE WORKOUT
             </Text>
             <Text allowFontScaling={false} style={styles.activeTitle}>
+              {activeWorkoutTitle}
+            </Text>
+            <Text allowFontScaling={false} style={styles.activeSubtitle}>
               {activeWorkout.length} Exercise
               {activeWorkout.length === 1 ? '' : 's'}
             </Text>
@@ -412,91 +479,104 @@ export function WorkoutScreen() {
               {expandedExerciseIds.has(item.exercise.id) && (
                 <View style={styles.setDropdown}>
                   <View style={styles.setHeader}>
-                    <Text
-                      allowFontScaling={false}
-                      style={[styles.setHeaderText, styles.checkboxColumn]}
-                    >
-                      DONE
-                    </Text>
-                    <Text allowFontScaling={false} style={styles.setHeaderText}>
-                      SET
-                    </Text>
-                    <Text allowFontScaling={false} style={styles.setHeaderText}>
-                      REPS
-                    </Text>
-                    <Text allowFontScaling={false} style={styles.setHeaderText}>
-                      KG
-                    </Text>
+                    <View style={styles.setDoneColumn}>
+                      <Text allowFontScaling={false} style={styles.setHeaderText}>
+                        DONE
+                      </Text>
+                    </View>
+                    <View style={styles.setValueColumn}>
+                      <Text allowFontScaling={false} style={styles.setHeaderText}>
+                        SET
+                      </Text>
+                    </View>
+                    <View style={styles.setValueColumn}>
+                      <Text allowFontScaling={false} style={styles.setHeaderText}>
+                        REPS
+                      </Text>
+                    </View>
+                    <View style={styles.setValueColumn}>
+                      <Text allowFontScaling={false} style={styles.setHeaderText}>
+                        KG
+                      </Text>
+                    </View>
                   </View>
 
                   {item.sets.map((set, index) => (
                     <View key={set.id} style={styles.setRow}>
-                      <TouchableOpacity
-                        onPress={() =>
-                          handleToggleSetDone(item.exercise.id, set.id)
-                        }
-                        style={[
-                          styles.checkboxButton,
-                          set.done && styles.checkboxButtonActive,
-                        ]}
-                        activeOpacity={0.75}
-                        accessibilityRole="checkbox"
-                        accessibilityState={{ checked: set.done }}
-                        accessibilityLabel={`Mark set ${index + 1} of ${item.exercise.name} as done`}
-                      >
-                        {set.done && (
-                          <Ionicons
-                            name="checkmark"
-                            size={18}
-                            color={colors.background}
-                          />
-                        )}
-                      </TouchableOpacity>
-
-                      <View style={styles.setNumber}>
-                        <Text
-                          allowFontScaling={false}
-                          style={styles.setNumberText}
+                      <View style={styles.setDoneColumn}>
+                        <TouchableOpacity
+                          onPress={() =>
+                            handleToggleSetDone(item.exercise.id, set.id)
+                          }
+                          style={[
+                            styles.checkboxButton,
+                            set.done && styles.checkboxButtonActive,
+                          ]}
+                          activeOpacity={0.75}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: set.done }}
+                          accessibilityLabel={`Mark set ${index + 1} of ${item.exercise.name} as done`}
                         >
-                          {index + 1}
-                        </Text>
+                          {set.done && (
+                            <Ionicons
+                              name="checkmark"
+                              size={18}
+                              color={colors.background}
+                            />
+                          )}
+                        </TouchableOpacity>
                       </View>
 
-                      <TextInput
-                        allowFontScaling={false}
-                        value={set.reps}
-                        onChangeText={(value) =>
-                          handleSetValueChange(
-                            item.exercise.id,
-                            set.id,
-                            'reps',
-                            value,
-                          )
-                        }
-                        keyboardType="number-pad"
-                        placeholder="0"
-                        placeholderTextColor={colors.textMuted}
-                        style={[styles.setInput, set.done && styles.setInputDone]}
-                        textAlign="center"
-                      />
+                      <View style={styles.setValueColumn}>
+                        <View style={styles.setNumber}>
+                          <Text
+                            allowFontScaling={false}
+                            style={styles.setNumberText}
+                          >
+                            {index + 1}
+                          </Text>
+                        </View>
+                      </View>
 
-                      <TextInput
-                        allowFontScaling={false}
-                        value={set.weight}
-                        onChangeText={(value) =>
-                          handleSetValueChange(
-                            item.exercise.id,
-                            set.id,
-                            'weight',
-                            value,
-                          )
-                        }
-                        keyboardType="decimal-pad"
-                        placeholder="0"
-                        placeholderTextColor={colors.textMuted}
-                        style={[styles.setInput, set.done && styles.setInputDone]}
-                        textAlign="center"
-                      />
+                      <View style={styles.setValueColumn}>
+                        <TextInput
+                          allowFontScaling={false}
+                          value={set.reps}
+                          onChangeText={(value) =>
+                            handleSetValueChange(
+                              item.exercise.id,
+                              set.id,
+                              'reps',
+                              value,
+                            )
+                          }
+                          keyboardType="number-pad"
+                          placeholder="0"
+                          placeholderTextColor={colors.textMuted}
+                          style={[styles.setInput, set.done && styles.setInputDone]}
+                          textAlign="center"
+                        />
+                      </View>
+
+                      <View style={styles.setValueColumn}>
+                        <TextInput
+                          allowFontScaling={false}
+                          value={set.weight}
+                          onChangeText={(value) =>
+                            handleSetValueChange(
+                              item.exercise.id,
+                              set.id,
+                              'weight',
+                              value,
+                            )
+                          }
+                          keyboardType="decimal-pad"
+                          placeholder="0"
+                          placeholderTextColor={colors.textMuted}
+                          style={[styles.setInput, set.done && styles.setInputDone]}
+                          textAlign="center"
+                        />
+                      </View>
                     </View>
                   ))}
 
@@ -688,6 +768,12 @@ const styles = StyleSheet.create({
     letterSpacing: 0,
     lineHeight: 38,
   },
+  activeSubtitle: {
+    color: colors.textSecondary,
+    fontSize: fontSize.caption,
+    fontWeight: '800',
+    lineHeight: 17,
+  },
   progressPanel: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
@@ -801,14 +887,20 @@ const styles = StyleSheet.create({
   },
   setHeaderText: {
     color: colors.textSecondary,
-    flex: 1,
     fontSize: fontSize.caption,
     fontWeight: '900',
     textAlign: 'center',
+    width: '100%',
   },
-  checkboxColumn: {
-    flex: 0,
-    width: 48,
+  setDoneColumn: {
+    alignItems: 'center',
+    flexShrink: 0,
+    justifyContent: 'center',
+    width: 56,
+  },
+  setValueColumn: {
+    flex: 1,
+    minWidth: 0,
   },
   setRow: {
     alignItems: 'center',
@@ -833,9 +925,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.surfaceAlt,
     borderRadius: radius.md,
-    flex: 1,
     height: 50,
     justifyContent: 'center',
+    width: '100%',
   },
   setNumberText: {
     color: colors.textPrimary,
@@ -848,11 +940,12 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     borderWidth: 1,
     color: colors.textPrimary,
-    flex: 1,
     fontSize: 20,
     fontWeight: '900',
     height: 50,
+    minWidth: 0,
     paddingHorizontal: spacing.sm,
+    width: '100%',
   },
   setInputDone: {
     borderColor: colors.accent,
