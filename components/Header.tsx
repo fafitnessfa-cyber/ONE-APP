@@ -1,9 +1,9 @@
 import React from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { LogoMark, LogoWordmark } from './BrandLogo';
-import { colors, spacing } from '../theme';
+import { colors, fontSize, spacing } from '../theme';
 
 export function Header() {
   const router = useRouter();
@@ -11,14 +11,17 @@ export function Header() {
   return (
     <View style={styles.container}>
       <View style={styles.logoRow}>
-        <LogoMark />
-        <LogoWordmark />
+        <LogoMark height={30} width={28} />
+        <LogoWordmark height={18} width={128} />
       </View>
 
       <View style={styles.actions}>
-        <Pressable style={styles.iconButton}>
-          <Ionicons name="notifications-outline" size={23} color={colors.textSecondary} />
-          <View style={styles.notificationDot} />
+        <Pressable style={styles.iconButton} accessibilityRole="button">
+          <Ionicons
+            name="notifications-outline"
+            size={22}
+            color={colors.textSecondary}
+          />
         </Pressable>
         <Pressable
           style={styles.avatar}
@@ -26,7 +29,9 @@ export function Header() {
           accessibilityRole="button"
           accessibilityLabel="Open profile"
         >
-          <Ionicons name="person" size={18} color={colors.textPrimary} />
+          <Text allowFontScaling={false} style={styles.avatarText}>
+            U
+          </Text>
         </Pressable>
       </View>
     </View>
@@ -37,8 +42,9 @@ const styles = StyleSheet.create({
   container: {
     alignItems: 'center',
     flexDirection: 'row',
-    minHeight: 40,
     justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+    minHeight: 40,
   },
   logoRow: {
     alignItems: 'center',
@@ -52,30 +58,23 @@ const styles = StyleSheet.create({
   },
   iconButton: {
     alignItems: 'center',
-    height: 36,
+    height: 34,
     justifyContent: 'center',
-    position: 'relative',
-    width: 36,
-  },
-  notificationDot: {
-    backgroundColor: colors.danger,
-    borderColor: colors.background,
-    borderRadius: 4,
-    borderWidth: 1,
-    height: 8,
-    position: 'absolute',
-    right: 7,
-    top: 7,
-    width: 8,
+    width: 34,
   },
   avatar: {
     alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: '#7C6348',
     borderColor: colors.border,
-    borderWidth: 1,
-    width: 36,
-    height: 36,
     borderRadius: 18,
+    borderWidth: 1,
+    height: 36,
     justifyContent: 'center',
+    width: 36,
+  },
+  avatarText: {
+    color: colors.textPrimary,
+    fontSize: fontSize.body,
+    fontWeight: '900',
   },
 });

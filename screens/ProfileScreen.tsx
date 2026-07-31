@@ -1,18 +1,33 @@
 import React from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Href, useRouter } from 'expo-router';
 import { AppScreen } from '../components/AppScreen';
 import { colors, fontSize, radius, spacing } from '../theme';
 
 const PROFILE_ITEMS = [
-  { icon: 'person', label: 'Personal Information' },
-  { icon: 'shield-checkmark', label: 'Account Settings' },
-  { icon: 'card', label: 'Plan & Subscription' },
-  { icon: 'settings', label: 'Settings' },
-  { icon: 'help-circle', label: 'Help & Support' },
+  {
+    icon: 'person',
+    label: 'Personal Information',
+    href: '/profile/personal-information',
+  },
+  {
+    icon: 'shield-checkmark',
+    label: 'Account Settings',
+    href: '/profile/account-settings',
+  },
+  {
+    icon: 'card',
+    label: 'Plan & Subscription',
+    href: '/profile/plan-subscription',
+  },
+  { icon: 'settings', label: 'Settings', href: '/profile/settings' },
+  { icon: 'help-circle', label: 'Help & Support', href: '/profile/help-support' },
 ] as const;
 
 export function ProfileScreen() {
+  const router = useRouter();
+
   return (
     <AppScreen>
       <ScrollView
@@ -35,14 +50,36 @@ export function ProfileScreen() {
 
         <View style={styles.menu}>
           {PROFILE_ITEMS.map((item) => (
-            <View key={item.label} style={styles.menuItem}>
+            <Pressable
+              key={item.label}
+              style={({ pressed }) => [
+                styles.menuItem,
+                pressed && styles.menuItemPressed,
+              ]}
+              onPress={() => router.push(item.href as Href)}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${item.label}`}
+            >
               <Ionicons name={item.icon} size={24} color={colors.accent} />
               <Text style={styles.menuText}>{item.label}</Text>
-            </View>
+              <Ionicons
+                name="chevron-forward"
+                size={20}
+                color={colors.textMuted}
+              />
+            </Pressable>
           ))}
-          <View style={[styles.menuItem, styles.logout]}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.menuItem,
+              styles.logout,
+              pressed && styles.menuItemPressed,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Log out"
+          >
             <Text style={styles.logoutText}>LOG OUT</Text>
-          </View>
+          </Pressable>
         </View>
       </ScrollView>
     </AppScreen>
@@ -117,11 +154,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flexDirection: 'row',
     gap: spacing.lg,
+    justifyContent: 'space-between',
     minHeight: 58,
     paddingHorizontal: spacing.lg,
   },
+  menuItemPressed: {
+    backgroundColor: colors.surfaceAlt,
+  },
   menuText: {
     color: colors.textPrimary,
+    flex: 1,
     fontSize: fontSize.title,
     fontWeight: '700',
   },
