@@ -1,5 +1,6 @@
 import {
   NutritionCatalogItem,
+  NutritionCatalogStateItem,
   NutritionDay,
   NutritionFoodItem,
   NutritionLogSource,
@@ -16,20 +17,58 @@ export function createNutritionFoodEntryId(
 }
 
 export function createNutritionFoodItem(
-  template: NutritionCatalogItem,
+  template: NutritionCatalogItem | NutritionCatalogStateItem,
   {
     servings = template.defaultServings,
     loggedFrom = 'search',
     entryKind = 'log',
+    entryType,
+    catalogServingId,
   }: {
     servings?: number;
     loggedFrom?: NutritionLogSource;
     entryKind?: 'seed' | 'log';
+    entryType?: NutritionFoodItem['entryType'];
+    catalogServingId?: string | null;
   } = {},
 ): NutritionFoodItem {
+  const stateTemplate =
+    'catalogFoodId' in template ||
+    'databaseId' in template ||
+    'userFoodId' in template ||
+    'recipeId' in template ||
+    'selectedServingId' in template
+      ? template
+      : null;
+  const inferredEntryType =
+    entryType ??
+    (stateTemplate?.recipeId
+      ? 'recipe'
+      : stateTemplate?.userFoodId
+      ? 'user_food'
+      : stateTemplate?.catalogFoodId
+      ? 'catalog'
+      : stateTemplate?.databaseId
+      ? 'legacy'
+      : 'legacy');
+  const effectiveGramsPerServing = stateTemplate?.effectiveGrams ?? null;
+  const selectedServingNutrientValues =
+    stateTemplate?.servingOptions?.find(
+      (serving) => serving.id === stateTemplate?.selectedServingId,
+    )?.nutrientValues ??
+    (stateTemplate?.baseAmount == null ? stateTemplate?.nutrientValues : undefined);
+
   return {
     id: createNutritionFoodEntryId(template.id, entryKind),
     catalogItemId: template.id,
+    entryType: inferredEntryType,
+    legacyFoodId: stateTemplate?.databaseId ?? null,
+    catalogFoodId: stateTemplate?.catalogFoodId ?? null,
+    userFoodId: stateTemplate?.userFoodId ?? null,
+    userFoodServingId: stateTemplate?.userFoodServingId ?? null,
+    recipeId: stateTemplate?.recipeId ?? null,
+    catalogServingId: catalogServingId ?? stateTemplate?.selectedServingId ?? null,
+    selectedServingId: stateTemplate?.selectedServingId,
     name: template.name,
     brand: template.brand,
     servingLabel: template.servingLabel,
@@ -42,6 +81,20 @@ export function createNutritionFoodItem(
     source: template.source,
     loggedFrom,
     servings,
+    servingQuantity: servings,
+    effectiveGrams:
+      effectiveGramsPerServing == null
+        ? null
+        : Number((effectiveGramsPerServing * servings).toFixed(4)),
+    nutrientValues: {
+      ...(selectedServingNutrientValues ?? {}),
+      energy_kcal: template.caloriesPerServing,
+      protein: template.proteinPerServing,
+      carbohydrate: template.carbsPerServing,
+      fat: template.fatsPerServing,
+      fiber: template.fiberPerServing,
+      sodium: template.sodiumMgPerServing,
+    },
   };
 }
 

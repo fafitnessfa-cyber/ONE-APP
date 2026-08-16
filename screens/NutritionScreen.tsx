@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -13,22 +15,63 @@ import { Ionicons } from '@expo/vector-icons';
 import Svg, { Circle } from 'react-native-svg';
 import { AppScreen } from '../components/AppScreen';
 import { LogoMark, LogoWordmark } from '../components/BrandLogo';
+import { BarcodeLookupModal } from '../components/nutrition/BarcodeLookupModal';
+import { CustomFoodEditorModal } from '../components/nutrition/CustomFoodEditorModal';
+import { RecipeEditorModal } from '../components/nutrition/RecipeEditorModal';
 import {
-  barcodePreviewIds,
   createNutritionFoodItem,
   createNutritionDaysState,
-  getCatalogItemById,
-  nutritionCatalog,
+  nutritionCatalog as localNutritionCatalog,
 } from '../data/nutrition';
 import {
-  NutritionCatalogItem,
+  applyServingSelection,
+  createLoggedFoodStateItem,
+  getCatalogFoodDetails,
+  mergeLoggedFoodIntoCatalogItem,
+  resolvePreferredServingSelection,
+  searchCatalogFoods,
+  withSingleServingOption,
+} from '../lib/nutrition/catalog';
+import {
+  archiveCustomFoodDefinition,
+  archiveRecipeDefinition,
+  getRecipeDetails,
+  getUserFoodDetails,
+  loadRecipeDefinition,
+  saveCustomFoodDefinition,
+  saveRecipeDefinition,
+  searchOwnedFoodsAndRecipes,
+  type CustomFoodDraft,
+  type RecipeDraft,
+} from '../lib/nutrition/user-items';
+import {
+  addFoodFavorite,
+  createFavoriteConfigKey,
+  createRemoteFoodLog,
+  deleteRemoteFoodLog,
+  loadPersonalizedFoodSections,
+  loadNutritionState,
+  removeFoodFavorite,
+  resolveShortcutForLogging,
+  searchFoodHistory,
+  type NutritionLoadResult,
+  type NutritionPersonalizedSections,
+  updateRemoteFoodLog,
+  updateRemoteFoodLogServings,
+  updateRemoteHydration,
+} from '../lib/nutrition-data';
+import {
   NutritionDay,
   NutritionDayId,
+  NutritionCatalogStateItem,
   NutritionFoodItem,
   NutritionLogSource,
   NutritionMacroKey,
   NutritionMeal,
   NutritionMealId,
+  NutritionServingOption,
+  NutritionShortcutItem,
+  NutritionShortcutKind,
 } from '../types';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
 
@@ -45,13 +88,18 @@ const BASE_MACRO_COLORS: Record<NutritionMacroKey, string> = {
 };
 
 const SOURCE_COPY: Record<
-  NutritionCatalogItem['source'],
+  NutritionCatalogStateItem['source'],
   { label: string; backgroundColor: string; textColor: string }
 > = {
   usda: {
     label: 'USDA',
     backgroundColor: '#1D2817',
     textColor: colors.accentLight,
+  },
+  branded: {
+    label: 'Branded',
+    backgroundColor: '#2A1D14',
+    textColor: '#FFC27C',
   },
   nutritionix: {
     label: 'Barcode',
@@ -68,16 +116,26 @@ const SOURCE_COPY: Record<
     backgroundColor: '#2B1C2D',
     textColor: '#F1AFFF',
   },
+  custom: {
+    label: 'Custom',
+    backgroundColor: '#16231A',
+    textColor: '#89E7A3',
+  },
 };
 
 const hydrationAccent = '#0FA7FF';
 const calorieTrack = '#768071';
 const amberAccent = '#FFC247';
 
-type LibraryMode = 'scanner' | 'smart';
+type LibraryMode = 'create';
+type LogDraftMode = 'create' | 'edit';
 
 interface LogDraft {
-  item: NutritionCatalogItem;
+  mode: LogDraftMode;
+  logId?: string;
+  favoriteId?: string;
+  favoriteConfigKey?: string;
+  item: NutritionCatalogStateItem;
   mealId: NutritionMealId;
   servings: number;
   loggedFrom: NutritionLogSource;
@@ -85,13 +143,105 @@ interface LogDraft {
 }
 
 interface FoodPickerEntry {
-  item: NutritionCatalogItem;
+  item: NutritionCatalogStateItem;
   note?: string;
   loggedFrom?: NutritionLogSource;
+  shortcut?: NutritionShortcutItem;
+  shortcutKind?: NutritionShortcutKind;
 }
+
+const EMPTY_PERSONALIZED_SECTIONS: NutritionPersonalizedSections = {
+  favorites: [],
+  goTos: [],
+  recents: [],
+};
 
 function getFoodCalories(item: NutritionFoodItem) {
   return item.caloriesPerServing * item.servings;
+}
+
+function isUuid(value: string | null | undefined) {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  );
+}
+
+function scaleLoggedFoodItem(item: NutritionFoodItem, servings: number): NutritionFoodItem {
+  const effectiveGramsPerServing =
+    item.effectiveGrams != null && item.servings > 0
+      ? item.effectiveGrams / item.servings
+      : null;
+
+  return {
+    ...item,
+    servings,
+    servingQuantity: servings,
+    effectiveGrams:
+      effectiveGramsPerServing == null
+        ? null
+        : Number((effectiveGramsPerServing * servings).toFixed(4)),
+  };
+}
+
+function buildDraftLocalFoodItem(
+  draft: LogDraft,
+  existingId?: string,
+): NutritionFoodItem {
+  const selectedServing = draft.item.servingOptions?.find(
+    (serving) => serving.id === draft.item.selectedServingId,
+  );
+  const baseItem = createNutritionFoodItem(draft.item, {
+    servings: draft.servings,
+    loggedFrom: draft.loggedFrom,
+    entryType:
+      draft.item.recipeId
+        ? 'recipe'
+        : draft.item.userFoodId
+        ? 'user_food'
+        : draft.item.catalogFoodId
+        ? 'catalog'
+        : draft.item.databaseId
+        ? 'legacy'
+        : 'legacy',
+    catalogServingId:
+      draft.item.catalogFoodId && isUuid(draft.item.selectedServingId)
+        ? draft.item.selectedServingId
+        : null,
+  });
+  const effectiveGramsPerServing =
+    draft.item.effectiveGrams ?? selectedServing?.gramWeight ?? null;
+
+  return {
+    ...baseItem,
+    id: existingId ?? baseItem.id,
+    catalogServingId:
+      draft.item.catalogFoodId && isUuid(draft.item.selectedServingId)
+        ? draft.item.selectedServingId
+        : null,
+    userFoodServingId:
+      draft.item.userFoodId && isUuid(draft.item.selectedServingId)
+        ? draft.item.selectedServingId
+        : baseItem.userFoodServingId,
+    servings: draft.servings,
+    servingQuantity: draft.servings,
+    selectedServingId: draft.item.selectedServingId,
+    effectiveGrams:
+      effectiveGramsPerServing == null
+        ? null
+        : Number((effectiveGramsPerServing * draft.servings).toFixed(4)),
+    nutrientValues: {
+      ...(selectedServing?.nutrientValues ?? {}),
+      energy_kcal: draft.item.caloriesPerServing,
+      protein: draft.item.proteinPerServing,
+      carbohydrate: draft.item.carbsPerServing,
+      fat: draft.item.fatsPerServing,
+      fiber: draft.item.fiberPerServing,
+      sodium: draft.item.sodiumMgPerServing,
+    },
+  };
 }
 
 function getMacroTotal(
@@ -205,81 +355,199 @@ function formatLiters(value: number) {
   return value.toFixed(1);
 }
 
+function formatCalories(value: number) {
+  return `${Math.round(value)}`;
+}
+
+function formatMacro(value: number | undefined) {
+  if (value == null) {
+    return '0';
+  }
+
+  const roundedValue = Number(value.toFixed(1));
+  return Number.isInteger(roundedValue) ? `${roundedValue}` : roundedValue.toFixed(1);
+}
+
+function formatQuantity(value: number) {
+  const roundedValue = Number(value.toFixed(4));
+  return `${roundedValue}`;
+}
+
 function clampProgress(value: number) {
   return Math.max(0, Math.min(value, 1));
 }
 
-function normalizeText(value: string) {
-  return value.trim().toLowerCase();
+function normalizeSearchQuery(value: string) {
+  return value.replace(/\s+/g, ' ').trim();
 }
 
-function getSearchScore(item: NutritionCatalogItem, query: string) {
-  const normalizedQuery = normalizeText(query);
-
-  if (!normalizedQuery) {
-    return 0;
-  }
-
-  const searchableText = [
-    item.name,
-    item.brand ?? '',
-    item.servingLabel,
-    ...item.keywords,
-  ]
-    .join(' ')
-    .toLowerCase();
-
-  if (!searchableText.includes(normalizedQuery)) {
-    return 0;
-  }
-
-  let score = 1;
-
-  if (item.name.toLowerCase().startsWith(normalizedQuery)) {
-    score += 4;
-  } else if (item.name.toLowerCase().includes(normalizedQuery)) {
-    score += 3;
-  }
-
-  if (item.brand?.toLowerCase().includes(normalizedQuery)) {
-    score += 2;
-  }
-
-  if (item.keywords.some((keyword) => keyword.toLowerCase().includes(normalizedQuery))) {
-    score += 1;
-  }
-
-  if (item.source === 'saved') {
-    score += 0.4;
-  }
-
-  if (item.source === 'recipe') {
-    score += 0.2;
-  }
-
-  return score;
+function normalizeComparableText(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? '';
 }
 
-function searchCatalogItems(query: string) {
-  const normalizedQuery = normalizeText(query);
-
-  if (!normalizedQuery) {
-    return [];
+function isNearlyEqual(left: number | null | undefined, right: number | null | undefined) {
+  if (left == null || right == null) {
+    return false;
   }
 
-  return nutritionCatalog
-    .map((item) => ({
-      item,
-      score: getSearchScore(item, normalizedQuery),
-    }))
-    .filter((entry) => entry.score > 0)
-    .sort((first, second) => second.score - first.score)
-    .slice(0, 6)
-    .map((entry) => entry.item);
+  return Math.abs(left - right) < 0.0001;
+}
+
+function buildCustomFoodDraftFromItem(item: NutritionCatalogStateItem): CustomFoodDraft {
+  const baseAmount = item.baseAmount ?? 100;
+  const baseUnit = item.baseUnit === 'ml' ? 'ml' : 'g';
+  const baseServingLabel = `${formatQuantity(baseAmount)} ${baseUnit}`;
+  const matchedBaseServing = (item.servingOptions ?? []).find(
+    (serving) =>
+      normalizeComparableText(serving.label) ===
+        normalizeComparableText(baseServingLabel) &&
+      isNearlyEqual(serving.quantity, baseAmount) &&
+      ((baseUnit === 'g' && isNearlyEqual(serving.gramWeight, baseAmount)) ||
+        (baseUnit === 'ml' && isNearlyEqual(serving.milliliterVolume, baseAmount))),
+  );
+  const baseServing = {
+    id: matchedBaseServing?.id,
+    servingName: matchedBaseServing?.label ?? baseServingLabel,
+    quantity: matchedBaseServing?.quantity ?? baseAmount,
+    gramWeight:
+      baseUnit === 'g'
+        ? (matchedBaseServing?.gramWeight ?? baseAmount)
+        : null,
+    milliliterVolume:
+      baseUnit === 'ml'
+        ? (matchedBaseServing?.milliliterVolume ?? baseAmount)
+        : null,
+    householdUnit: matchedBaseServing?.householdUnit ?? baseUnit,
+    isDefault:
+      matchedBaseServing?.isDefault ??
+      !(item.servingOptions ?? []).some((serving) => serving.isDefault),
+    sortOrder: 0,
+  };
+  const extraServings = (item.servingOptions ?? [])
+    .filter((serving) => serving.id !== matchedBaseServing?.id)
+    .map((serving, index) => ({
+      id: serving.id,
+      servingName: serving.label,
+      quantity: serving.quantity,
+      gramWeight: serving.gramWeight ?? null,
+      milliliterVolume: serving.milliliterVolume ?? null,
+      householdUnit: serving.householdUnit ?? null,
+      isDefault: serving.isDefault,
+      sortOrder: index + 1,
+    }));
+
+  return {
+    id: item.userFoodId ?? item.id,
+    name: item.name,
+    brandName: item.brand ?? '',
+    description: item.description ?? '',
+    baseAmount,
+    baseUnit,
+    nutrientValues:
+      item.nutrientValues ?? {
+        energy_kcal: item.caloriesPerServing,
+        protein: item.proteinPerServing,
+        carbohydrate: item.carbsPerServing,
+        fat: item.fatsPerServing,
+        fiber: item.fiberPerServing,
+        sodium: item.sodiumMgPerServing,
+      },
+    servings: [baseServing, ...extraServings],
+  };
+}
+
+function formatRelativeLogTime(value: string | undefined) {
+  if (!value) {
+    return 'recently';
+  }
+
+  const targetDate = new Date(value);
+  const now = new Date();
+  const diffMs = now.getTime() - targetDate.getTime();
+
+  if (!Number.isFinite(diffMs) || diffMs < 0) {
+    return 'recently';
+  }
+
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    return 'today';
+  }
+
+  if (diffDays === 1) {
+    return 'yesterday';
+  }
+
+  if (diffDays < 7) {
+    return `${diffDays}d ago`;
+  }
+
+  const diffWeeks = Math.floor(diffDays / 7);
+
+  if (diffWeeks < 5) {
+    return `${diffWeeks}w ago`;
+  }
+
+  const diffMonths = Math.floor(diffDays / 30);
+  return `${Math.max(diffMonths, 1)}mo ago`;
+}
+
+function formatShortcutNote(
+  shortcut: NutritionShortcutItem,
+  activeMealLabel: string,
+) {
+  if (shortcut.kind === 'favorite') {
+    return 'Favorite shortcut for faster re-logging.';
+  }
+
+  if (shortcut.kind === 'go_to') {
+    if (shortcut.mealMatchCount && shortcut.mealMatchCount > 1) {
+      return `Repeated ${activeMealLabel.toLowerCase()} pick with ${shortcut.logCount ?? 0} recent logs.`;
+    }
+
+    return `Frequently logged around ${activeMealLabel.toLowerCase()}.`;
+  }
+
+  if (shortcut.kind === 'history') {
+    return shortcut.logCount && shortcut.logCount > 1
+      ? `${shortcut.logCount} matching logs • last ${formatRelativeLogTime(shortcut.lastLoggedAt)}`
+      : `Matched your log history • last ${formatRelativeLogTime(shortcut.lastLoggedAt)}`;
+  }
+
+  return shortcut.logCount && shortcut.logCount > 1
+    ? `${shortcut.logCount} total logs • last ${formatRelativeLogTime(shortcut.lastLoggedAt)}`
+    : `Last logged ${formatRelativeLogTime(shortcut.lastLoggedAt)}`;
+}
+
+function createShortcutEntry(
+  shortcut: NutritionShortcutItem,
+  activeMealLabel: string,
+  loggedFrom: NutritionLogSource,
+): FoodPickerEntry {
+  return {
+    item: shortcut.item,
+    note: formatShortcutNote(shortcut, activeMealLabel),
+    loggedFrom,
+    shortcut,
+    shortcutKind: shortcut.kind,
+  };
+}
+
+function getShortcutLoggedFrom(shortcutKind: NutritionShortcutKind): NutritionLogSource {
+  return shortcutKind === 'go_to' ? 'suggested' : 'search';
+}
+
+function getShortcutSelectionId(shortcut: NutritionShortcutItem) {
+  return `shortcut:${shortcut.kind}:${shortcut.id}`;
+}
+
+function getCatalogSelectionId(item: NutritionCatalogStateItem) {
+  return `catalog:${item.catalogFoodId ?? item.id}`;
 }
 
 function buildSuggestionReason(
-  item: NutritionCatalogItem,
+  item: NutritionCatalogStateItem,
   mealId: NutritionMealId,
   calorieBalance: number,
   remainingProtein: number,
@@ -329,7 +597,11 @@ function buildSuggestionReason(
   return 'Balanced option that keeps your calories and macros moving in the right direction.';
 }
 
-function getSuggestedFoods(day: NutritionDay, mealId: NutritionMealId) {
+function getSuggestedFoods(
+  catalog: NutritionCatalogStateItem[],
+  day: NutritionDay,
+  mealId: NutritionMealId,
+) {
   const calorieBalance = getRemainingCalories(day);
   const remainingProtein = Math.max(
     day.macroGoals.protein - getDayConsumedMacro(day, 'protein'),
@@ -344,7 +616,7 @@ function getSuggestedFoods(day: NutritionDay, mealId: NutritionMealId) {
     0,
   );
 
-  return nutritionCatalog
+  return catalog
     .filter((item) => item.source !== 'nutritionix')
     .map((item) => {
       const calories = item.caloriesPerServing * item.defaultServings;
@@ -401,9 +673,77 @@ function updateMeal(
 }
 
 function isCatalogItem(
-  item: NutritionCatalogItem | undefined,
-): item is NutritionCatalogItem {
+  item: NutritionCatalogStateItem | undefined,
+): item is NutritionCatalogStateItem {
   return Boolean(item);
+}
+
+function getNutritionErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    if (
+      error.message.includes('EXPO_PUBLIC_SUPABASE_URL') ||
+      error.message.includes('EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY')
+    ) {
+      return error.message;
+    }
+
+    if (error.message.includes('selected food could not be loaded')) {
+      return 'The selected food could not be loaded right now.';
+    }
+
+    if (error.message.includes('not available in the Supabase catalog yet')) {
+      return 'This food is not ready to log yet.';
+    }
+
+    if (error.message.includes('missing the nutrient data required for logging')) {
+      return 'This food does not have enough nutrient data to be logged yet.';
+    }
+  }
+
+  return 'Please try again in a moment.';
+}
+
+function showNutritionAlert(title: string, message: string) {
+  if (Platform.OS === 'web') {
+    globalThis.alert?.(`${title}\n\n${message}`);
+    return;
+  }
+
+  Alert.alert(title, message);
+}
+
+function showNutritionConfirm({
+  title,
+  message,
+  confirmLabel,
+  onConfirm,
+}: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+}) {
+  if (Platform.OS === 'web') {
+    const didConfirm = globalThis.confirm?.(`${title}\n\n${message}`) ?? false;
+
+    if (didConfirm) {
+      onConfirm();
+    }
+
+    return;
+  }
+
+  Alert.alert(title, message, [
+    {
+      text: 'Cancel',
+      style: 'cancel',
+    },
+    {
+      text: confirmLabel,
+      style: 'destructive',
+      onPress: onConfirm,
+    },
+  ]);
 }
 
 function NutritionHeader() {
@@ -596,7 +936,48 @@ function MealTargetChip({
   );
 }
 
-function SourceBadge({ source }: { source: NutritionCatalogItem['source'] }) {
+function ServingOptionChip({
+  serving,
+  isActive,
+  onPress,
+}: {
+  serving: NutritionServingOption;
+  isActive: boolean;
+  onPress: () => void;
+}) {
+  const isDisabled = serving.isSupported === false;
+
+  return (
+    <Pressable
+      style={[
+        styles.targetChip,
+        isActive && styles.targetChipActive,
+        isDisabled && styles.targetChipDisabled,
+      ]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{
+        disabled: isDisabled,
+        ...(isActive ? { selected: true } : {}),
+      }}
+      accessibilityLabel={`Use serving size ${serving.label}`}
+      disabled={isDisabled}
+    >
+      <Text
+        allowFontScaling={false}
+        style={[
+          styles.targetChipText,
+          isActive && styles.targetChipTextActive,
+          isDisabled && styles.targetChipTextDisabled,
+        ]}
+      >
+        {serving.label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function SourceBadge({ source }: { source: NutritionCatalogStateItem['source'] }) {
   const copy = SOURCE_COPY[source];
 
   return (
@@ -621,7 +1002,7 @@ function FoodPickerRow({
   note,
   onPress,
 }: {
-  item: NutritionCatalogItem;
+  item: NutritionCatalogStateItem;
   note?: string;
   onPress: () => void;
 }) {
@@ -653,11 +1034,11 @@ function FoodPickerRow({
         ) : null}
 
         <Text allowFontScaling={false} style={styles.catalogStats}>
-          {item.defaultServings} x {item.servingLabel} •{' '}
-          {item.caloriesPerServing * item.defaultServings} kcal • P
-          {item.proteinPerServing * item.defaultServings}g • C
-          {item.carbsPerServing * item.defaultServings}g • F
-          {item.fatsPerServing * item.defaultServings}g
+          {formatMacro(item.defaultServings)} x {item.servingLabel} •{' '}
+          {formatCalories(item.caloriesPerServing * item.defaultServings)} kcal • P
+          {formatMacro(item.proteinPerServing * item.defaultServings)}g • C
+          {formatMacro(item.carbsPerServing * item.defaultServings)}g • F
+          {formatMacro(item.fatsPerServing * item.defaultServings)}g
         </Text>
       </View>
 
@@ -674,6 +1055,7 @@ function MealCard({
   onAddFood,
   onAddServing,
   onDecreaseServing,
+  onEditFood,
   onDeleteFood,
 }: {
   meal: NutritionMeal;
@@ -681,6 +1063,7 @@ function MealCard({
   onAddFood: () => void;
   onAddServing: (itemId: string) => void;
   onDecreaseServing: (itemId: string) => void;
+  onEditFood: (item: NutritionFoodItem) => void;
   onDeleteFood: (item: NutritionFoodItem) => void;
 }) {
   const mealCalories = getMealCalories(meal);
@@ -704,14 +1087,20 @@ function MealCard({
         ) : (
           meal.items.map((item) => (
             <View key={item.id} style={styles.foodRow}>
-              <View style={styles.foodMeta}>
+              <Pressable
+                style={styles.foodMeta}
+                onPress={() => onEditFood(item)}
+                accessibilityRole="button"
+                accessibilityLabel={`Edit ${item.name}`}
+                accessibilityHint="Opens the saved serving and quantity editor"
+              >
                 <Text allowFontScaling={false} style={styles.foodName}>
                   {item.name}
                 </Text>
                 <Text allowFontScaling={false} style={styles.foodCalories}>
                   {item.servings} x {item.servingLabel} • {getFoodCalories(item)} kcal
                 </Text>
-              </View>
+              </Pressable>
 
               <View style={styles.foodActions}>
                 <Pressable
@@ -855,48 +1244,51 @@ function LibrarySection({
   );
 }
 
+function QuickActionCard({
+  icon,
+  title,
+  description,
+  onPress,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+  description: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable style={styles.quickActionCard} onPress={onPress}>
+      <View style={styles.quickActionIcon}>
+        <Ionicons name={icon} size={18} color={colors.accent} />
+      </View>
+      <View style={styles.quickActionText}>
+        <Text allowFontScaling={false} style={styles.quickActionTitle}>
+          {title}
+        </Text>
+        <Text allowFontScaling={false} style={styles.quickActionDescription}>
+          {description}
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+    </Pressable>
+  );
+}
+
 function LibraryModal({
   visible,
-  mode,
   mealLabel,
-  selectedDay,
-  activeMealId,
   onClose,
-  onPick,
+  onCreateCustomFood,
+  onCreateRecipe,
 }: {
   visible: boolean;
-  mode: LibraryMode | null;
   mealLabel: string;
-  selectedDay: NutritionDay;
-  activeMealId: NutritionMealId;
   onClose: () => void;
-  onPick: (entry: FoodPickerEntry) => void;
+  onCreateCustomFood: () => void;
+  onCreateRecipe: () => void;
 }) {
-  const scannerEntries = barcodePreviewIds
-    .map((itemId) => getCatalogItemById(itemId))
-    .filter(isCatalogItem);
-  const savedEntries = nutritionCatalog
-    .filter((item) => item.source === 'saved')
-    .map((item) => ({
-      item,
-      note: 'Saved for faster re-logging.',
-      loggedFrom: 'saved' as const,
-    }));
-  const recipeEntries = nutritionCatalog
-    .filter((item) => item.source === 'recipe')
-    .map((item) => ({
-      item,
-      note: 'Recipe-style entry with balanced macros.',
-      loggedFrom: 'recipe' as const,
-    }));
-  const suggestedItems = getSuggestedFoods(selectedDay, activeMealId);
-
-  const title =
-    mode === 'scanner' ? 'Packaged Food Results' : 'Saved Meals & Suggestions';
+  const title = 'Quick Actions';
   const subtitle =
-    mode === 'scanner'
-      ? 'Preview branded items the way a packaged-food lookup flow would feel before camera wiring is added.'
-      : 'Quick picks below are organized around saved meals, recipes, and the calories and macros you still have left today.';
+    'Search stays the main logging flow. Use these shortcuts only when you want to create a private food or recipe.';
 
   return (
     <Modal
@@ -940,39 +1332,20 @@ function LibraryModal({
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.sheetContent}
           >
-            {mode === 'scanner' ? (
-              <LibrarySection
-                title="Packaged Picks"
-                entries={scannerEntries.map((item) => ({
-                  item,
-                  note: 'Branded sample for the packaged-food flow.',
-                  loggedFrom: 'barcode' as const,
-                }))}
-                onPick={onPick}
+            <View style={styles.quickActionList}>
+              <QuickActionCard
+                icon="nutrition-outline"
+                title="Create Custom Food"
+                description="Add a private food with macros, optional micros, and extra servings."
+                onPress={onCreateCustomFood}
               />
-            ) : (
-              <>
-                <LibrarySection
-                  title="Suggested for Today"
-                  entries={suggestedItems.map((entry) => ({
-                    item: entry.item,
-                    note: entry.reason,
-                    loggedFrom: 'suggested' as const,
-                  }))}
-                  onPick={onPick}
-                />
-                <LibrarySection
-                  title="Saved Meals"
-                  entries={savedEntries}
-                  onPick={onPick}
-                />
-                <LibrarySection
-                  title="Recipes"
-                  entries={recipeEntries}
-                  onPick={onPick}
-                />
-              </>
-            )}
+              <QuickActionCard
+                icon="book-outline"
+                title="Create Recipe"
+                description="Build a private recipe from USDA foods and your custom foods, then log by grams or servings."
+                onPress={onCreateRecipe}
+              />
+            </View>
           </ScrollView>
         </View>
       </View>
@@ -1002,28 +1375,80 @@ function DraftMetric({
 function FoodLogModal({
   draft,
   meals,
+  isFavorite,
+  isFavoritePending,
+  canEditDefinition,
+  isDefinitionPending,
   onClose,
+  onEditDefinition,
   onSelectMeal,
+  onSelectServing,
   onAdjustServings,
+  onSetServings,
+  onToggleFavorite,
   onConfirm,
 }: {
   draft: LogDraft | null;
   meals: NutritionMeal[];
+  isFavorite: boolean;
+  isFavoritePending: boolean;
+  canEditDefinition: boolean;
+  isDefinitionPending: boolean;
   onClose: () => void;
+  onEditDefinition: () => void;
   onSelectMeal: (mealId: NutritionMealId) => void;
+  onSelectServing: (servingId: string) => void;
   onAdjustServings: (delta: number) => void;
-  onConfirm: () => void;
+  onSetServings: (servings: number) => void;
+  onToggleFavorite: () => void;
+  onConfirm: (servingsOverride?: number) => void;
 }) {
+  const [quantityInput, setQuantityInput] = useState('');
+
+  useEffect(() => {
+    if (!draft) {
+      return;
+    }
+
+    setQuantityInput(formatQuantity(draft.servings));
+  }, [draft]);
+
   if (!draft) {
     return null;
   }
 
-  const totalCalories = draft.item.caloriesPerServing * draft.servings;
-  const totalProtein = draft.item.proteinPerServing * draft.servings;
-  const totalCarbs = draft.item.carbsPerServing * draft.servings;
-  const totalFats = draft.item.fatsPerServing * draft.servings;
-  const totalFiber = (draft.item.fiberPerServing ?? 0) * draft.servings;
-  const totalSodium = (draft.item.sodiumMgPerServing ?? 0) * draft.servings;
+  const parsedQuantity = Number(quantityInput.trim());
+  const hasInvalidQuantityInput =
+    quantityInput.trim().length > 0 &&
+    (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0);
+  const previewServings =
+    !hasInvalidQuantityInput && quantityInput.trim().length > 0
+      ? parsedQuantity
+      : draft.servings;
+  const totalCalories = draft.item.caloriesPerServing * previewServings;
+  const totalProtein = draft.item.proteinPerServing * previewServings;
+  const totalCarbs = draft.item.carbsPerServing * previewServings;
+  const totalFats = draft.item.fatsPerServing * previewServings;
+  const totalFiber = (draft.item.fiberPerServing ?? 0) * previewServings;
+  const totalSodium = (draft.item.sodiumMgPerServing ?? 0) * previewServings;
+  const effectiveGrams =
+    draft.item.effectiveGrams == null
+      ? null
+      : Number((draft.item.effectiveGrams * previewServings).toFixed(4));
+  const servingOptions = draft.item.servingOptions ?? [];
+  const confirmMealLabel =
+    meals.find((meal) => meal.id === draft.mealId)?.label ?? draft.mealId;
+  const syncServings = (servings: number) => {
+    onSetServings(servings);
+    setQuantityInput(formatQuantity(servings));
+  };
+  const handleConfirmPress = () => {
+    if (hasInvalidQuantityInput) {
+      return;
+    }
+
+    onConfirm(previewServings);
+  };
 
   return (
     <Modal
@@ -1040,21 +1465,72 @@ function FoodLogModal({
           <View style={styles.sheetHeader}>
             <View style={styles.sheetHeaderText}>
               <Text allowFontScaling={false} style={styles.sheetTitle}>
-                Review Food Log
+                {draft.mode === 'edit' ? 'Edit Food Log' : 'Review Food Log'}
               </Text>
               <Text allowFontScaling={false} style={styles.sheetSubtitle}>
-                Confirm the serving size and meal before saving.
+                {draft.mode === 'edit'
+                  ? 'Update the serving, quantity, and meal before saving.'
+                  : 'Confirm the serving, quantity, and meal before saving.'}
               </Text>
             </View>
 
-            <Pressable
-              style={styles.closeButton}
-              onPress={onClose}
-              accessibilityRole="button"
-              accessibilityLabel="Close food review"
-            >
-              <Ionicons name="close" size={18} color={colors.textSecondary} />
-            </Pressable>
+            <View style={styles.sheetHeaderActions}>
+              {canEditDefinition ? (
+                <Pressable
+                  style={styles.closeButton}
+                  onPress={onEditDefinition}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Edit ${draft.item.name} definition`}
+                  disabled={isDefinitionPending}
+                >
+                  {isDefinitionPending ? (
+                    <ActivityIndicator size="small" color={colors.accent} />
+                  ) : (
+                    <Ionicons
+                      name="create-outline"
+                      size={18}
+                      color={colors.textSecondary}
+                    />
+                  )}
+                </Pressable>
+              ) : null}
+
+              {draft.item.catalogFoodId ? (
+                <Pressable
+                  style={[
+                    styles.closeButton,
+                    isFavorite && styles.favoriteButtonActive,
+                  ]}
+                  onPress={onToggleFavorite}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    isFavorite
+                      ? `Remove ${draft.item.name} from favorites`
+                      : `Add ${draft.item.name} to favorites`
+                  }
+                  disabled={isFavoritePending}
+                >
+                  {isFavoritePending ? (
+                    <ActivityIndicator size="small" color={colors.accent} />
+                  ) : (
+                    <Ionicons
+                      name={isFavorite ? 'heart' : 'heart-outline'}
+                      size={18}
+                      color={isFavorite ? colors.accent : colors.textSecondary}
+                    />
+                  )}
+                </Pressable>
+              ) : null}
+
+              <Pressable
+                style={styles.closeButton}
+                onPress={onClose}
+                accessibilityRole="button"
+                accessibilityLabel="Close food review"
+              >
+                <Ionicons name="close" size={18} color={colors.textSecondary} />
+              </Pressable>
+            </View>
           </View>
 
           <View style={styles.draftHero}>
@@ -1079,6 +1555,18 @@ function FoodLogModal({
             <Text allowFontScaling={false} style={styles.servingCardLabel}>
               Serving Size
             </Text>
+            {servingOptions.length > 1 ? (
+              <View style={styles.targetChipRow}>
+                {servingOptions.map((serving) => (
+                  <ServingOptionChip
+                    key={serving.id}
+                    serving={serving}
+                    isActive={serving.id === draft.item.selectedServingId}
+                    onPress={() => onSelectServing(serving.id)}
+                  />
+                ))}
+              </View>
+            ) : null}
             <View style={styles.servingControls}>
               <Pressable
                 style={styles.stepperButton}
@@ -1089,9 +1577,29 @@ function FoodLogModal({
                 <Ionicons name="remove" size={18} color={colors.textPrimary} />
               </Pressable>
               <View style={styles.servingValueWrap}>
-                <Text allowFontScaling={false} style={styles.servingValue}>
-                  {draft.servings}
-                </Text>
+                <TextInput
+                  allowFontScaling={false}
+                  style={styles.servingInput}
+                  keyboardType="decimal-pad"
+                  value={quantityInput}
+                  onChangeText={setQuantityInput}
+                  onBlur={() => {
+                    if (hasInvalidQuantityInput || quantityInput.trim().length === 0) {
+                      setQuantityInput(formatQuantity(draft.servings));
+                      return;
+                    }
+
+                    syncServings(previewServings);
+                  }}
+                  onSubmitEditing={() => {
+                    if (hasInvalidQuantityInput || quantityInput.trim().length === 0) {
+                      setQuantityInput(formatQuantity(draft.servings));
+                      return;
+                    }
+
+                    syncServings(previewServings);
+                  }}
+                />
                 <Text allowFontScaling={false} style={styles.servingHint}>
                   x {draft.item.servingLabel}
                 </Text>
@@ -1105,6 +1613,16 @@ function FoodLogModal({
                 <Ionicons name="add" size={18} color={colors.textPrimary} />
               </Pressable>
             </View>
+            {effectiveGrams != null ? (
+              <Text allowFontScaling={false} style={styles.servingInputMeta}>
+                Effective grams: {formatQuantity(effectiveGrams)} g
+              </Text>
+            ) : null}
+            {hasInvalidQuantityInput ? (
+              <Text allowFontScaling={false} style={styles.inlineErrorText}>
+                Enter a positive quantity to continue.
+              </Text>
+            ) : null}
           </View>
 
           <Text allowFontScaling={false} style={styles.draftSectionLabel}>
@@ -1122,12 +1640,12 @@ function FoodLogModal({
           </View>
 
           <View style={styles.draftMetricsGrid}>
-            <DraftMetric label="Calories" value={`${totalCalories}`} />
-            <DraftMetric label="Protein" value={`${totalProtein}g`} />
-            <DraftMetric label="Carbs" value={`${totalCarbs}g`} />
-            <DraftMetric label="Fats" value={`${totalFats}g`} />
-            <DraftMetric label="Fiber" value={`${totalFiber}g`} />
-            <DraftMetric label="Sodium" value={`${totalSodium}mg`} />
+            <DraftMetric label="Calories" value={formatCalories(totalCalories)} />
+            <DraftMetric label="Protein" value={`${formatMacro(totalProtein)}g`} />
+            <DraftMetric label="Carbs" value={`${formatMacro(totalCarbs)}g`} />
+            <DraftMetric label="Fats" value={`${formatMacro(totalFats)}g`} />
+            <DraftMetric label="Fiber" value={`${formatMacro(totalFiber)}g`} />
+            <DraftMetric label="Sodium" value={`${formatMacro(totalSodium)}mg`} />
           </View>
 
           {draft.note ? (
@@ -1143,14 +1661,24 @@ function FoodLogModal({
 
           <Pressable
             style={styles.confirmButton}
-            onPress={onConfirm}
+            onPress={handleConfirmPress}
+            disabled={hasInvalidQuantityInput}
             accessibilityRole="button"
-            accessibilityLabel={`Log ${draft.item.name}`}
+            accessibilityLabel={
+              draft.mode === 'edit'
+                ? `Save changes to ${draft.item.name}`
+                : `Log ${draft.item.name}`
+            }
           >
-            <Text allowFontScaling={false} style={styles.confirmButtonText}>
-              Log to{' '}
-              {meals.find((meal) => meal.id === draft.mealId)?.label ??
-                draft.mealId}
+            <Text
+              allowFontScaling={false}
+              style={[
+                styles.confirmButtonText,
+                hasInvalidQuantityInput && styles.confirmButtonTextDisabled,
+              ]}
+            >
+              {draft.mode === 'edit' ? 'Save to ' : 'Log to '}
+              {confirmMealLabel}
             </Text>
           </Pressable>
         </View>
@@ -1162,18 +1690,49 @@ function FoodLogModal({
 export function NutritionScreen() {
   const [selectedDayId, setSelectedDayId] = useState<NutritionDayId>('today');
   const [search, setSearch] = useState('');
+  const [catalog, setCatalog] =
+    useState<NutritionCatalogStateItem[]>(() =>
+      localNutritionCatalog.map((item) => withSingleServingOption(item)),
+    );
+  const [searchResults, setSearchResults] = useState<NutritionCatalogStateItem[]>([]);
+  const [ownedSearchResults, setOwnedSearchResults] =
+    useState<NutritionCatalogStateItem[]>([]);
+  const [historyResults, setHistoryResults] = useState<NutritionShortcutItem[]>([]);
+  const [isSearchLoading, setIsSearchLoading] = useState(false);
+  const [isOwnedSearchLoading, setIsOwnedSearchLoading] = useState(false);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [isPersonalizationLoading, setIsPersonalizationLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [ownedSearchError, setOwnedSearchError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [personalizationError, setPersonalizationError] = useState<string | null>(null);
+  const [activeSearchSelectionId, setActiveSearchSelectionId] = useState<string | null>(null);
   const [days, setDays] = useState<NutritionDay[]>(() =>
     createNutritionDaysState(),
   );
+  const [userId, setUserId] = useState<string | null>(null);
   const [activeMealId, setActiveMealId] =
     useState<NutritionMealId>('breakfast');
   const [libraryMode, setLibraryMode] = useState<LibraryMode | null>(null);
+  const [isBarcodeModalVisible, setIsBarcodeModalVisible] = useState(false);
   const [draft, setDraft] = useState<LogDraft | null>(null);
+  const [customFoodEditorDraft, setCustomFoodEditorDraft] =
+    useState<CustomFoodDraft | null>(null);
+  const [recipeEditorDraft, setRecipeEditorDraft] = useState<RecipeDraft | null>(null);
+  const [isCustomFoodEditorVisible, setIsCustomFoodEditorVisible] = useState(false);
+  const [isRecipeEditorVisible, setIsRecipeEditorVisible] = useState(false);
+  const [isDefinitionPending, setIsDefinitionPending] = useState(false);
+  const [isFavoritePending, setIsFavoritePending] = useState(false);
+  const [personalizedSections, setPersonalizedSections] =
+    useState<NutritionPersonalizedSections>(EMPTY_PERSONALIZED_SECTIONS);
+  const [personalizationRefreshToken, setPersonalizationRefreshToken] = useState(0);
+  const searchRequestSequenceRef = useRef(0);
+  const personalizationRequestSequenceRef = useRef(0);
 
   const selectedDay = days.find((day) => day.id === selectedDayId) ?? days[0];
   const consumedCalories = getDayConsumedCalories(selectedDay);
   const remainingCalories = getRemainingCalories(selectedDay);
-  const searchResults = searchCatalogItems(search);
+  const normalizedSearch = normalizeSearchQuery(search);
   const leftColumnMeals = selectedDay.meals.filter((_, index) => index % 2 === 0);
   const rightColumnMeals = selectedDay.meals.filter((_, index) => index % 2 === 1);
   const activeMeal =
@@ -1183,6 +1742,58 @@ export function NutritionScreen() {
     selectedDay.hydrationLiters - selectedDay.hydrationGoalLiters,
     0,
   );
+  const historyCatalogFoodIds = new Set(
+    historyResults.flatMap((shortcut) =>
+      shortcut.item.catalogFoodId ? [shortcut.item.catalogFoodId] : [],
+    ),
+  );
+  const visibleCatalogResults = searchResults.filter(
+    (item) =>
+      !item.catalogFoodId || !historyCatalogFoodIds.has(item.catalogFoodId),
+  );
+  const ownedFoodEntries = ownedSearchResults.map((item) => ({
+    item,
+    loggedFrom: 'search' as const,
+  }));
+  const createShortcutEntries = (shortcuts: NutritionShortcutItem[]) =>
+    shortcuts.map((shortcut) => {
+      const entry = createShortcutEntry(
+        shortcut,
+        activeMeal.label,
+        getShortcutLoggedFrom(shortcut.kind),
+      );
+
+      return activeSearchSelectionId === getShortcutSelectionId(shortcut)
+        ? {
+            ...entry,
+            note: 'Loading food details...',
+          }
+        : entry;
+    });
+  const favoriteEntries = createShortcutEntries(personalizedSections.favorites);
+  const historyEntries = createShortcutEntries(historyResults);
+  const getFavoriteMatch = (
+    item: NutritionCatalogStateItem,
+    servings: number,
+  ) => {
+    if (!item.catalogFoodId) {
+      return null;
+    }
+
+    const favoriteConfigKey = createFavoriteConfigKey(
+      item.catalogFoodId,
+      item.selectedServingId,
+      servings,
+    );
+
+    return (
+      personalizedSections.favorites.find(
+        (shortcut) => shortcut.favoriteConfigKey === favoriteConfigKey,
+      ) ?? null
+    );
+  };
+  const activeDraftFavorite = draft ? getFavoriteMatch(draft.item, draft.servings) : null;
+  const isDraftFavorite = activeDraftFavorite != null;
 
   const updateSelectedDay = (updater: (day: NutritionDay) => NutritionDay) => {
     setDays((previousDays) =>
@@ -1192,43 +1803,363 @@ export function NutritionScreen() {
     );
   };
 
-  const openDraft = (
-    item: NutritionCatalogItem,
-    loggedFrom: NutritionLogSource,
-    note?: string,
-  ) => {
+  const bumpPersonalizationRefresh = () => {
+    setPersonalizationRefreshToken((previousValue) => previousValue + 1);
+  };
+
+  const applyNutritionState = (state: NutritionLoadResult) => {
+    setCatalog(state.catalog);
+    setDays(state.days);
+    setUserId(state.userId);
+  };
+
+  const reloadNutritionState = async (showAlert = true) => {
+    try {
+      applyNutritionState(await loadNutritionState());
+      return true;
+    } catch (error) {
+      if (showAlert) {
+        showNutritionAlert('Nutrition sync issue', getNutritionErrorMessage(error));
+      }
+
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    let isActive = true;
+
+    const syncNutritionState = async () => {
+      try {
+        const state = await loadNutritionState();
+
+        if (!isActive) {
+          return;
+        }
+
+        applyNutritionState(state);
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+
+        showNutritionAlert('Nutrition sync issue', getNutritionErrorMessage(error));
+      }
+    };
+
+    void syncNutritionState();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!userId || normalizedSearch.length >= 2) {
+      setIsPersonalizationLoading(false);
+      setPersonalizationError(null);
+      return;
+    }
+
+    const nextRequestSequence = personalizationRequestSequenceRef.current + 1;
+    personalizationRequestSequenceRef.current = nextRequestSequence;
+
+    const timeoutId = setTimeout(() => {
+      setIsPersonalizationLoading(true);
+      setPersonalizationError(null);
+
+      void loadPersonalizedFoodSections(activeMealId).then(
+        (sections) => {
+          if (personalizationRequestSequenceRef.current !== nextRequestSequence) {
+            return;
+          }
+
+          setPersonalizedSections(sections);
+          setIsPersonalizationLoading(false);
+        },
+        (error) => {
+          console.error('Personalized nutrition sections failed', error);
+
+          if (personalizationRequestSequenceRef.current !== nextRequestSequence) {
+            return;
+          }
+
+          setPersonalizedSections(EMPTY_PERSONALIZED_SECTIONS);
+          setPersonalizationError('Unable to load your shortcuts right now.');
+          setIsPersonalizationLoading(false);
+        },
+      );
+    }, 150);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [activeMealId, normalizedSearch, personalizationRefreshToken, userId]);
+
+  useEffect(() => {
+    const nextRequestSequence = searchRequestSequenceRef.current + 1;
+    searchRequestSequenceRef.current = nextRequestSequence;
+
+    if (!userId || normalizedSearch.length < 2) {
+      setSearchResults([]);
+      setOwnedSearchResults([]);
+      setHistoryResults([]);
+      setSearchError(null);
+      setOwnedSearchError(null);
+      setHistoryError(null);
+      setIsSearchLoading(false);
+      setIsOwnedSearchLoading(false);
+      setIsHistoryLoading(false);
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      setIsSearchLoading(true);
+      setIsOwnedSearchLoading(true);
+      setIsHistoryLoading(true);
+      setSearchError(null);
+      setOwnedSearchError(null);
+      setHistoryError(null);
+
+      void Promise.allSettled([
+        searchFoodHistory(normalizedSearch),
+        searchOwnedFoodsAndRecipes(normalizedSearch),
+        searchCatalogFoods(normalizedSearch),
+      ]).then(([historyResult, ownedResult, catalogResult]) => {
+        if (searchRequestSequenceRef.current !== nextRequestSequence) {
+          return;
+        }
+
+        if (historyResult.status === 'fulfilled') {
+          setHistoryResults(historyResult.value);
+        } else {
+          console.error('History food search failed', historyResult.reason);
+          setHistoryResults([]);
+          setHistoryError('History is unavailable right now.');
+        }
+
+        if (ownedResult.status === 'fulfilled') {
+          setOwnedSearchResults(ownedResult.value);
+        } else {
+          console.error('Owned food search failed', ownedResult.reason);
+          setOwnedSearchResults([]);
+          setOwnedSearchError('Your private foods are unavailable right now.');
+        }
+
+        if (catalogResult.status === 'fulfilled') {
+          setSearchResults(catalogResult.value);
+        } else {
+          console.error('Catalog food search failed', catalogResult.reason);
+          setSearchResults([]);
+          setSearchError('Unable to load foods right now.');
+        }
+
+        setIsHistoryLoading(false);
+        setIsOwnedSearchLoading(false);
+        setIsSearchLoading(false);
+      });
+    }, 300);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [normalizedSearch, personalizationRefreshToken, userId]);
+
+  const openDraft = ({
+    item,
+    loggedFrom,
+    note,
+    mealId = activeMealId,
+    servings = item.defaultServings,
+    mode = 'create',
+    logId,
+    favoriteId,
+    favoriteConfigKey,
+  }: {
+    item: NutritionCatalogStateItem;
+    loggedFrom: NutritionLogSource;
+    note?: string;
+    mealId?: NutritionMealId;
+    servings?: number;
+    mode?: LogDraftMode;
+    logId?: string;
+    favoriteId?: string;
+    favoriteConfigKey?: string;
+  }) => {
     setDraft({
+      mode,
+      logId,
+      favoriteId,
+      favoriteConfigKey,
       item,
-      mealId: activeMealId,
-      servings: item.defaultServings,
+      mealId,
+      servings,
       loggedFrom,
       note,
     });
     setLibraryMode(null);
   };
 
+  const handleStartCustomFoodCreate = () => {
+    setLibraryMode(null);
+    setCustomFoodEditorDraft(null);
+    setIsCustomFoodEditorVisible(true);
+  };
+
+  const handleStartRecipeCreate = () => {
+    setLibraryMode(null);
+    setRecipeEditorDraft(null);
+    setIsRecipeEditorVisible(true);
+  };
+
+  const handleSelectSearchResult = async (item: NutritionCatalogStateItem) => {
+    const catalogFoodId = item.catalogFoodId ?? item.id;
+    const selectionId = getCatalogSelectionId(item);
+    setActiveSearchSelectionId(selectionId);
+
+    try {
+      openDraft({
+        item: await getCatalogFoodDetails(catalogFoodId),
+        loggedFrom: 'search',
+      });
+    } catch (error) {
+      console.error('Catalog food detail load failed', error);
+      showNutritionAlert('Unable to load food', getNutritionErrorMessage(error));
+    } finally {
+      setActiveSearchSelectionId((currentValue) =>
+        currentValue === selectionId ? null : currentValue,
+      );
+    }
+  };
+
+  const handleSelectOwnedSearchResult = (item: NutritionCatalogStateItem) => {
+    openDraft({
+      item,
+      loggedFrom: 'search',
+    });
+  };
+
+  const handleSelectShortcut = async (
+    shortcut: NutritionShortcutItem,
+    note?: string,
+  ) => {
+    const selectionId = getShortcutSelectionId(shortcut);
+    setActiveSearchSelectionId(selectionId);
+
+    try {
+      openDraft({
+        item: await resolveShortcutForLogging(shortcut),
+        loggedFrom: getShortcutLoggedFrom(shortcut.kind),
+        note,
+        favoriteId: shortcut.favoriteId,
+        favoriteConfigKey: shortcut.favoriteConfigKey,
+      });
+    } catch (error) {
+      console.error('Personalized shortcut resolution failed', error);
+      showNutritionAlert('Unable to load food', getNutritionErrorMessage(error));
+    } finally {
+      setActiveSearchSelectionId((currentValue) =>
+        currentValue === selectionId ? null : currentValue,
+      );
+    }
+  };
+
+  const handleEditDraftDefinition = async () => {
+    if (!draft) {
+      return;
+    }
+
+    try {
+      setIsDefinitionPending(true);
+
+      if (draft.item.userFoodId) {
+        const detail = await getUserFoodDetails(draft.item.userFoodId);
+        setCustomFoodEditorDraft(buildCustomFoodDraftFromItem(detail));
+        setIsCustomFoodEditorVisible(true);
+        return;
+      }
+
+      if (draft.item.recipeId) {
+        setRecipeEditorDraft(await loadRecipeDefinition(draft.item.recipeId));
+        setIsRecipeEditorVisible(true);
+      }
+    } catch (error) {
+      showNutritionAlert('Unable to load editor', getNutritionErrorMessage(error));
+    } finally {
+      setIsDefinitionPending(false);
+    }
+  };
+
   const handleAddServing = (mealId: NutritionMealId, itemId: string) => {
+    const item = selectedDay.meals
+      .find((meal) => meal.id === mealId)
+      ?.items.find((mealItem) => mealItem.id === itemId);
+
+    if (!item) {
+      return;
+    }
+
+    const nextServings = item.servings + 1;
+
     updateSelectedDay((day) =>
       updateMeal(day, mealId, (meal) => ({
         ...meal,
         items: meal.items.map((item) =>
-          item.id === itemId ? { ...item, servings: item.servings + 1 } : item,
+          item.id === itemId ? scaleLoggedFoodItem(item, nextServings) : item,
         ),
       })),
     );
+
+    if (!userId) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        await updateRemoteFoodLogServings(item, nextServings);
+        bumpPersonalizationRefresh();
+      } catch (error) {
+        showNutritionAlert('Unable to update servings', getNutritionErrorMessage(error));
+        await reloadNutritionState(false);
+      }
+    })();
   };
 
   const handleDecreaseServing = (mealId: NutritionMealId, itemId: string) => {
+    const item = selectedDay.meals
+      .find((meal) => meal.id === mealId)
+      ?.items.find((mealItem) => mealItem.id === itemId);
+
+    if (!item) {
+      return;
+    }
+
+    const nextServings = Math.max(1, item.servings - 1);
+
     updateSelectedDay((day) =>
       updateMeal(day, mealId, (meal) => ({
         ...meal,
         items: meal.items.map((item) =>
           item.id === itemId
-            ? { ...item, servings: Math.max(1, item.servings - 1) }
+            ? scaleLoggedFoodItem(item, nextServings)
             : item,
         ),
       })),
     );
+
+    if (!userId) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        await updateRemoteFoodLogServings(item, nextServings);
+        bumpPersonalizationRefresh();
+      } catch (error) {
+        showNutritionAlert('Unable to update servings', getNutritionErrorMessage(error));
+        await reloadNutritionState(false);
+      }
+    })();
   };
 
   const removeFood = (mealId: NutritionMealId, itemId: string) => {
@@ -1244,49 +2175,152 @@ export function NutritionScreen() {
     const mealLabel =
       selectedDay.meals.find((meal) => meal.id === mealId)?.label ?? 'this meal';
 
-    Alert.alert(
-      'Remove logged food?',
-      `${item.name} will be removed from ${mealLabel}.`,
-      [
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: () => removeFood(mealId, item.id),
-        },
-      ],
-    );
+    showNutritionConfirm({
+      title: 'Remove logged food?',
+      message: `${item.name} will be removed from ${mealLabel}.`,
+      confirmLabel: 'Remove',
+      onConfirm: () => {
+        removeFood(mealId, item.id);
+
+        if (!userId) {
+          return;
+        }
+
+        void (async () => {
+          try {
+            await deleteRemoteFoodLog(item.id);
+            bumpPersonalizationRefresh();
+          } catch (error) {
+            showNutritionAlert(
+              'Unable to remove food',
+              getNutritionErrorMessage(error),
+            );
+            await reloadNutritionState(false);
+          }
+        })();
+      },
+    });
   };
 
   const handleStartMealLog = (mealId: NutritionMealId) => {
     setActiveMealId(mealId);
-    setLibraryMode('smart');
+    setLibraryMode('create');
   };
 
-  const handleConfirmDraft = () => {
+  const handleEditFood = async (
+    mealId: NutritionMealId,
+    item: NutritionFoodItem,
+  ) => {
+    let editableItem = createLoggedFoodStateItem(item);
+
+    if (item.entryType === 'catalog' && item.catalogFoodId) {
+      try {
+        editableItem = mergeLoggedFoodIntoCatalogItem(
+          item,
+          await getCatalogFoodDetails(item.catalogFoodId),
+        );
+      } catch (error) {
+        console.error('Catalog food edit load failed', error);
+      }
+    }
+
+    openDraft({
+      mode: 'edit',
+      logId: item.id,
+      item: editableItem,
+      mealId,
+      servings: item.servings,
+      loggedFrom: item.loggedFrom,
+    });
+  };
+
+  const handleConfirmDraft = async (servingsOverride?: number) => {
     if (!draft) {
       return;
     }
 
-    updateSelectedDay((day) =>
-      updateMeal(day, draft.mealId, (meal) => ({
-        ...meal,
-        // Keep duplicate logs as separate rows so each entry can be edited or deleted independently.
-        items: [
-          ...meal.items,
-          createNutritionFoodItem(draft.item, {
-            servings: draft.servings,
-            loggedFrom: draft.loggedFrom,
-          }),
-        ],
-      })),
-    );
+    const nextDraft =
+      servingsOverride != null ? { ...draft, servings: servingsOverride } : draft;
 
-    setSearch('');
-    setDraft(null);
+    if (!userId) {
+      if (nextDraft.mode === 'edit' && nextDraft.logId) {
+        const updatedItem = buildDraftLocalFoodItem(nextDraft, nextDraft.logId);
+
+        updateSelectedDay((day) => ({
+          ...day,
+          meals: day.meals.map((meal) => {
+            const remainingItems = meal.items.filter(
+              (item) => item.id !== nextDraft.logId,
+            );
+
+            if (meal.id === nextDraft.mealId) {
+              return {
+                ...meal,
+                items: [...remainingItems, updatedItem],
+              };
+            }
+
+            return remainingItems.length === meal.items.length
+              ? meal
+              : {
+                  ...meal,
+                  items: remainingItems,
+                };
+          }),
+        }));
+      } else {
+        updateSelectedDay((day) =>
+          updateMeal(day, nextDraft.mealId, (meal) => ({
+            ...meal,
+            // Keep duplicate logs as separate rows so each entry can be edited or deleted independently.
+            items: [...meal.items, buildDraftLocalFoodItem(nextDraft)],
+          })),
+        );
+      }
+
+      setSearch('');
+      setDraft(null);
+      return;
+    }
+
+    try {
+      if (nextDraft.mode === 'edit' && nextDraft.logId) {
+        await updateRemoteFoodLog({
+          logId: nextDraft.logId,
+          item: nextDraft.item,
+          loggedFrom: nextDraft.loggedFrom,
+          mealId: nextDraft.mealId,
+          note: nextDraft.note,
+          servings: nextDraft.servings,
+        });
+        await reloadNutritionState(false);
+        bumpPersonalizationRefresh();
+      } else {
+        const loggedItem = await createRemoteFoodLog({
+          dayId: selectedDayId,
+          item: nextDraft.item,
+          loggedFrom: nextDraft.loggedFrom,
+          mealId: nextDraft.mealId,
+          note: nextDraft.note,
+          servings: nextDraft.servings,
+          userId,
+        });
+
+        updateSelectedDay((day) =>
+          updateMeal(day, nextDraft.mealId, (meal) => ({
+            ...meal,
+            items: [...meal.items, loggedItem],
+          })),
+        );
+        bumpPersonalizationRefresh();
+      }
+
+      setSearch('');
+      setDraft(null);
+    } catch (error) {
+      showNutritionAlert('Unable to log food', getNutritionErrorMessage(error));
+      await reloadNutritionState(false);
+    }
   };
 
   const handleAdjustDraftServings = (delta: number) => {
@@ -1294,45 +2328,192 @@ export function NutritionScreen() {
       previousDraft
         ? {
             ...previousDraft,
-            servings: Math.max(1, previousDraft.servings + delta),
+            servings: Math.max(
+              0.1,
+              Number((previousDraft.servings + delta).toFixed(4)),
+            ),
           }
         : previousDraft,
     );
   };
 
-  const handleAddHydration = (amount: number) => {
+  const handleSetDraftServings = (servings: number) => {
+    setDraft((previousDraft) =>
+      previousDraft
+        ? {
+            ...previousDraft,
+            servings: Number(servings.toFixed(4)),
+          }
+        : previousDraft,
+    );
+  };
+
+  const handleSelectDraftServing = (servingId: string) => {
+    setDraft((previousDraft) =>
+      previousDraft
+        ? {
+            ...previousDraft,
+            item: applyServingSelection(previousDraft.item, servingId),
+          }
+        : previousDraft,
+    );
+  };
+
+  const handleSaveCustomFood = async (nextDraft: CustomFoodDraft) => {
+    try {
+      const savedFoodId = await saveCustomFoodDefinition(nextDraft);
+      const detail = await getUserFoodDetails(savedFoodId);
+
+      setCustomFoodEditorDraft(null);
+      setIsCustomFoodEditorVisible(false);
+      setSearch(detail.name);
+      setDraft((previousDraft) =>
+        previousDraft?.item.userFoodId === savedFoodId
+          ? { ...previousDraft, item: detail }
+          : previousDraft,
+      );
+      bumpPersonalizationRefresh();
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  const handleArchiveCustomFood = async (userFoodId: string) => {
+    await archiveCustomFoodDefinition(userFoodId);
+    setCustomFoodEditorDraft(null);
+    setIsCustomFoodEditorVisible(false);
+    setDraft((previousDraft) =>
+      previousDraft?.item.userFoodId === userFoodId ? null : previousDraft,
+    );
+    bumpPersonalizationRefresh();
+  };
+
+  const handleSaveRecipe = async (nextDraft: RecipeDraft) => {
+    try {
+      const savedRecipeId = await saveRecipeDefinition(nextDraft);
+      const detail = await getRecipeDetails(savedRecipeId);
+
+      setRecipeEditorDraft(null);
+      setIsRecipeEditorVisible(false);
+      setSearch(detail.name);
+      setDraft((previousDraft) =>
+        previousDraft?.item.recipeId === savedRecipeId
+          ? { ...previousDraft, item: detail }
+          : previousDraft,
+      );
+      bumpPersonalizationRefresh();
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  const handleArchiveRecipe = async (recipeId: string) => {
+    await archiveRecipeDefinition(recipeId);
+    setRecipeEditorDraft(null);
+    setIsRecipeEditorVisible(false);
+    setDraft((previousDraft) =>
+      previousDraft?.item.recipeId === recipeId ? null : previousDraft,
+    );
+    bumpPersonalizationRefresh();
+  };
+
+  const handleHydrationChange = (delta: number) => {
+    let nextHydration = 0;
+
     updateSelectedDay((day) => ({
       ...day,
-      hydrationLiters: day.hydrationLiters + amount,
+      hydrationLiters: (() => {
+        nextHydration = Math.max(
+          0,
+          Number((day.hydrationLiters + delta).toFixed(1)),
+        );
+        return nextHydration;
+      })(),
     }));
+
+    if (!userId) {
+      return;
+    }
+
+    void updateRemoteHydration(userId, selectedDayId, nextHydration).catch(
+      async (error) => {
+        showNutritionAlert(
+          'Unable to update hydration',
+          getNutritionErrorMessage(error),
+        );
+        await reloadNutritionState(false);
+      },
+    );
+  };
+
+  const handleAddHydration = (amount: number) => {
+    handleHydrationChange(amount);
   };
 
   const handleReduceHydration = (amount: number) => {
-    updateSelectedDay((day) => ({
-      ...day,
-      hydrationLiters: Math.max(0, day.hydrationLiters - amount),
-    }));
+    handleHydrationChange(-amount);
   };
 
   const handleOpenBarcode = () => {
-    setLibraryMode('scanner');
+    setIsBarcodeModalVisible(true);
   };
 
   const handleOpenQuickLibrary = () => {
-    setLibraryMode('smart');
+    setLibraryMode('create');
   };
 
-  const handleLibraryPick = ({ item, loggedFrom, note }: FoodPickerEntry) => {
-    openDraft(
+  const handleBarcodeFoodFound = (item: NutritionCatalogStateItem) => {
+    setIsBarcodeModalVisible(false);
+    openDraft({
       item,
-      loggedFrom ??
+      loggedFrom: 'barcode',
+    });
+  };
+
+  const handleLibraryPick = ({
+    item,
+    loggedFrom,
+    note,
+    shortcut,
+  }: FoodPickerEntry) => {
+    if (shortcut) {
+      void handleSelectShortcut(shortcut, note);
+      return;
+    }
+
+    openDraft({
+      item,
+      loggedFrom:
+        loggedFrom ??
         (item.source === 'saved'
           ? 'saved'
           : item.source === 'recipe'
           ? 'recipe'
           : 'suggested'),
       note,
-    );
+    });
+  };
+
+  const handleToggleDraftFavorite = async () => {
+    if (!draft?.item.catalogFoodId || isFavoritePending) {
+      return;
+    }
+
+    setIsFavoritePending(true);
+
+    try {
+      if (activeDraftFavorite?.favoriteId) {
+        await removeFoodFavorite(activeDraftFavorite.favoriteId);
+      } else {
+        await addFoodFavorite(draft.item, draft.servings);
+      }
+
+      setPersonalizedSections(await loadPersonalizedFoodSections(activeMealId));
+    } catch (error) {
+      showNutritionAlert('Unable to update favorite', getNutritionErrorMessage(error));
+    } finally {
+      setIsFavoritePending(false);
+    }
   };
 
   return (
@@ -1467,9 +2648,9 @@ export function NutritionScreen() {
               style={[styles.searchAction, styles.searchActionPrimary]}
               onPress={handleOpenQuickLibrary}
               accessibilityRole="button"
-              accessibilityLabel="Open saved meals and suggestions"
+              accessibilityLabel="Open quick nutrition actions"
             >
-              <Ionicons name="flash" size={18} color={colors.background} />
+              <Ionicons name="add" size={18} color={colors.background} />
             </Pressable>
           </View>
 
@@ -1489,38 +2670,152 @@ export function NutritionScreen() {
             </View>
           </View>
 
-          {search.trim() ? (
-            <View style={styles.searchResultsCard}>
-              <View style={styles.searchResultsHeader}>
-                <Text allowFontScaling={false} style={styles.searchResultsTitle}>
-                  SEARCH RESULTS
+          <View style={styles.searchResultsCard}>
+            <View style={styles.searchResultsHeader}>
+              <Text allowFontScaling={false} style={styles.searchResultsTitle}>
+                {normalizedSearch.length >= 2 ? 'SEARCH RESULTS' : 'READY TO LOG'}
+              </Text>
+              <Text allowFontScaling={false} style={styles.searchResultsMeta}>
+                {normalizedSearch.length >= 2
+                  ? isSearchLoading || isOwnedSearchLoading || isHistoryLoading
+                    ? 'Searching...'
+                    : searchError &&
+                      ownedSearchResults.length === 0 &&
+                      historyEntries.length === 0
+                    ? 'Unavailable'
+                    : `${
+                        historyEntries.length +
+                        ownedSearchResults.length +
+                        visibleCatalogResults.length
+                      } shown`
+                  : 'Search or create'}
+              </Text>
+            </View>
+
+            {normalizedSearch.length < 2 ? (
+              <>
+                <Text allowFontScaling={false} style={styles.searchHint}>
+                  Search above to log from the USDA database, or create a private
+                  custom food or recipe.
                 </Text>
-                <Text allowFontScaling={false} style={styles.searchResultsMeta}>
-                  {searchResults.length} found
+                <View style={styles.compactActionRow}>
+                  <Pressable
+                    style={styles.compactActionButton}
+                    onPress={handleStartCustomFoodCreate}
+                  >
+                    <Ionicons
+                      name="nutrition-outline"
+                      size={16}
+                      color={colors.accent}
+                    />
+                    <Text
+                      allowFontScaling={false}
+                      style={styles.compactActionButtonText}
+                    >
+                      Custom Food
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.compactActionButton}
+                    onPress={handleStartRecipeCreate}
+                  >
+                    <Ionicons name="book-outline" size={16} color={colors.accent} />
+                    <Text
+                      allowFontScaling={false}
+                      style={styles.compactActionButtonText}
+                    >
+                      Recipe
+                    </Text>
+                  </Pressable>
+                </View>
+                {personalizationError ? (
+                  <Text allowFontScaling={false} style={styles.emptyStateText}>
+                    {personalizationError}
+                  </Text>
+                ) : null}
+              </>
+            ) : isSearchLoading &&
+              isOwnedSearchLoading &&
+              isHistoryLoading &&
+              historyEntries.length === 0 &&
+              ownedSearchResults.length === 0 &&
+              visibleCatalogResults.length === 0 ? (
+              <View style={styles.searchLoadingRow}>
+                <ActivityIndicator size="small" color={colors.accent} />
+                <Text allowFontScaling={false} style={styles.emptyStateText}>
+                  Searching foods...
                 </Text>
               </View>
+            ) : (
+              <>
+                <LibrarySection
+                  title="Your Foods & Recipes"
+                  entries={ownedFoodEntries}
+                  onPick={({ item }) => handleSelectOwnedSearchResult(item)}
+                />
 
-              {searchResults.length === 0 ? (
-                <Text allowFontScaling={false} style={styles.emptyStateText}>
-                  No foods matched that search yet.
-                </Text>
-              ) : (
-                searchResults.map((item) => (
-                  <FoodPickerRow
-                    key={item.id}
-                    item={item}
-                    onPress={() => openDraft(item, 'search')}
-                  />
-                ))
-              )}
-            </View>
-          ) : (
-            <Text allowFontScaling={false} style={styles.searchHint}>
-              Search foods manually, use the barcode button for packaged items,
-              or tap the green quick-add button for saved meals and goal-based
-              suggestions.
-            </Text>
-          )}
+                {ownedSearchError && ownedSearchResults.length === 0 ? (
+                  <Text allowFontScaling={false} style={styles.emptyStateText}>
+                    {ownedSearchError}
+                  </Text>
+                ) : null}
+
+                <LibrarySection
+                  title="From Your History"
+                  entries={historyEntries}
+                  onPick={handleLibraryPick}
+                />
+
+                {historyError && historyEntries.length === 0 ? (
+                  <Text allowFontScaling={false} style={styles.emptyStateText}>
+                    {historyError}
+                  </Text>
+                ) : null}
+
+                {visibleCatalogResults.length > 0 ? (
+                  <View style={styles.librarySection}>
+                    <Text
+                      allowFontScaling={false}
+                      style={styles.librarySectionTitle}
+                    >
+                      Food Database
+                    </Text>
+                    <View style={styles.librarySectionBody}>
+                      {visibleCatalogResults.map((item) => (
+                        <FoodPickerRow
+                          key={item.id}
+                          item={item}
+                          note={
+                            activeSearchSelectionId === getCatalogSelectionId(item)
+                              ? 'Loading food details...'
+                              : undefined
+                          }
+                          onPress={() => void handleSelectSearchResult(item)}
+                        />
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+
+                {searchError && visibleCatalogResults.length === 0 ? (
+                  <Text allowFontScaling={false} style={styles.emptyStateText}>
+                    {searchError}
+                  </Text>
+                ) : null}
+
+                {historyEntries.length === 0 &&
+                ownedSearchResults.length === 0 &&
+                visibleCatalogResults.length === 0 &&
+                !searchError &&
+                !ownedSearchError &&
+                !historyError ? (
+                  <Text allowFontScaling={false} style={styles.emptyStateText}>
+                    No foods found.
+                  </Text>
+                ) : null}
+              </>
+            )}
+          </View>
 
           <View style={styles.mealColumns}>
             <View style={styles.mealColumn}>
@@ -1534,6 +2829,7 @@ export function NutritionScreen() {
                   onDecreaseServing={(itemId) =>
                     handleDecreaseServing(meal.id, itemId)
                   }
+                  onEditFood={(item) => void handleEditFood(meal.id, item)}
                   onDeleteFood={(item) => handleDeleteFood(meal.id, item)}
                 />
               ))}
@@ -1550,6 +2846,7 @@ export function NutritionScreen() {
                   onDecreaseServing={(itemId) =>
                     handleDecreaseServing(meal.id, itemId)
                   }
+                  onEditFood={(item) => void handleEditFood(meal.id, item)}
                   onDeleteFood={(item) => handleDeleteFood(meal.id, item)}
                 />
               ))}
@@ -1624,27 +2921,62 @@ export function NutritionScreen() {
       </ScrollView>
 
       <LibraryModal
-        visible={libraryMode !== null}
-        mode={libraryMode}
+        visible={libraryMode === 'create'}
         mealLabel={activeMeal.label}
-        selectedDay={selectedDay}
-        activeMealId={activeMealId}
         onClose={() => setLibraryMode(null)}
-        onPick={handleLibraryPick}
+        onCreateCustomFood={handleStartCustomFoodCreate}
+        onCreateRecipe={handleStartRecipeCreate}
+      />
+
+      <BarcodeLookupModal
+        visible={isBarcodeModalVisible}
+        mealLabel={activeMeal.label}
+        onClose={() => setIsBarcodeModalVisible(false)}
+        onFoodFound={handleBarcodeFoodFound}
       />
 
       <FoodLogModal
         draft={draft}
         meals={selectedDay.meals}
+        isFavorite={isDraftFavorite}
+        isFavoritePending={isFavoritePending}
+        canEditDefinition={Boolean(draft?.item.userFoodId || draft?.item.recipeId)}
+        isDefinitionPending={isDefinitionPending}
         onClose={() => setDraft(null)}
+        onEditDefinition={() => void handleEditDraftDefinition()}
         onSelectMeal={(mealId) => {
           setActiveMealId(mealId);
           setDraft((previousDraft) =>
             previousDraft ? { ...previousDraft, mealId } : previousDraft,
           );
         }}
+        onSelectServing={handleSelectDraftServing}
         onAdjustServings={handleAdjustDraftServings}
+        onSetServings={handleSetDraftServings}
+        onToggleFavorite={() => void handleToggleDraftFavorite()}
         onConfirm={handleConfirmDraft}
+      />
+
+      <CustomFoodEditorModal
+        initialDraft={customFoodEditorDraft}
+        visible={isCustomFoodEditorVisible}
+        onClose={() => {
+          setIsCustomFoodEditorVisible(false);
+          setCustomFoodEditorDraft(null);
+        }}
+        onSave={handleSaveCustomFood}
+        onArchive={handleArchiveCustomFood}
+      />
+
+      <RecipeEditorModal
+        initialDraft={recipeEditorDraft}
+        visible={isRecipeEditorVisible}
+        onClose={() => {
+          setIsRecipeEditorVisible(false);
+          setRecipeEditorDraft(null);
+        }}
+        onSave={handleSaveRecipe}
+        onArchive={handleArchiveRecipe}
       />
     </AppScreen>
   );
@@ -1921,6 +3253,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accentDark,
     borderColor: colors.accent,
   },
+  targetChipDisabled: {
+    opacity: 0.45,
+  },
   targetChipText: {
     color: colors.textSecondary,
     fontSize: 12,
@@ -1928,6 +3263,9 @@ const styles = StyleSheet.create({
   },
   targetChipTextActive: {
     color: colors.textPrimary,
+  },
+  targetChipTextDisabled: {
+    color: colors.textMuted,
   },
   searchResultsCard: {
     backgroundColor: '#10170F',
@@ -1941,6 +3279,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
+  },
+  searchLoadingRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
   },
   searchResultsTitle: {
     color: colors.textPrimary,
@@ -1956,6 +3299,28 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 11,
     lineHeight: 16,
+  },
+  compactActionRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  compactActionButton: {
+    alignItems: 'center',
+    backgroundColor: '#131B12',
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  compactActionButtonText: {
+    color: colors.textPrimary,
+    fontSize: 12,
+    fontWeight: '700',
   },
   catalogRow: {
     alignItems: 'center',
@@ -2230,6 +3595,10 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: spacing.xs,
   },
+  sheetHeaderActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
   sheetTitle: {
     color: colors.textPrimary,
     fontFamily: fontFamily.display,
@@ -2249,6 +3618,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: 32,
   },
+  favoriteButtonActive: {
+    backgroundColor: '#213525',
+  },
   sheetTarget: {
     alignSelf: 'flex-start',
     backgroundColor: '#172117',
@@ -2265,6 +3637,41 @@ const styles = StyleSheet.create({
   sheetContent: {
     gap: spacing.md,
     paddingTop: spacing.md,
+  },
+  quickActionList: {
+    gap: spacing.sm,
+  },
+  quickActionCard: {
+    alignItems: 'center',
+    backgroundColor: '#0F150E',
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    padding: spacing.md,
+  },
+  quickActionIcon: {
+    alignItems: 'center',
+    backgroundColor: '#172117',
+    borderRadius: radius.pill,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  quickActionText: {
+    flex: 1,
+    gap: 2,
+  },
+  quickActionTitle: {
+    color: colors.textPrimary,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  quickActionDescription: {
+    color: colors.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
   },
   librarySection: {
     gap: spacing.sm,
@@ -2337,6 +3744,14 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+  servingInput: {
+    color: colors.textPrimary,
+    fontSize: 24,
+    fontWeight: '900',
+    minWidth: 72,
+    paddingVertical: 0,
+    textAlign: 'center',
+  },
   servingValue: {
     color: colors.textPrimary,
     fontSize: 24,
@@ -2346,6 +3761,16 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 12,
     fontWeight: '600',
+  },
+  servingInputMeta: {
+    color: colors.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  inlineErrorText: {
+    color: colors.danger,
+    fontSize: 11,
+    lineHeight: 16,
   },
   draftSectionLabel: {
     color: colors.textSecondary,
@@ -2411,6 +3836,9 @@ const styles = StyleSheet.create({
     color: colors.background,
     fontSize: 14,
     fontWeight: '900',
+  },
+  confirmButtonTextDisabled: {
+    opacity: 0.55,
   },
   emptyStateText: {
     color: colors.textMuted,
