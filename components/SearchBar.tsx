@@ -18,6 +18,7 @@ export function SearchBar({ value, onChangeText, placeholder }: SearchBarProps) 
         style={styles.input}
         value={value}
         onChangeText={onChangeText}
+        accessibilityLabel="Search exercises"
         placeholder={placeholder ?? 'Search exercises...'}
         placeholderTextColor={colors.textMuted}
       />

@@ -1,30 +1,43 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, fontSize, fontFamily } from '../theme';
-import { Exercise } from '../types';
+import type { Exercise } from '../lib/exercises/types';
 
 interface ExerciseCardProps {
   exercise: Exercise;
   selected: boolean;
   onToggle: (id: string) => void;
+  onOpenDetails: (exercise: Exercise) => void;
 }
 
-export function ExerciseCard({ exercise, selected, onToggle }: ExerciseCardProps) {
+export function ExerciseCard({
+  exercise,
+  selected,
+  onToggle,
+  onOpenDetails,
+}: ExerciseCardProps) {
   return (
     <View style={styles.card}>
-      <View style={styles.imagePlaceholder}>
-        <Ionicons name="barbell-outline" size={28} color={colors.accent} />
-      </View>
+      <Pressable
+        onPress={() => onOpenDetails(exercise)}
+        style={({ pressed }) => [styles.summaryButton, pressed && styles.summaryButtonPressed]}
+        accessibilityRole="button"
+        accessibilityLabel={`Open details for ${exercise.name}`}
+      >
+        <View style={styles.imagePlaceholder}>
+          <Ionicons name="barbell-outline" size={28} color={colors.accent} />
+        </View>
 
-      <View style={styles.info}>
-        <Text allowFontScaling={false} style={styles.name}>
-          {exercise.name.toUpperCase()}
-        </Text>
-        <Text allowFontScaling={false} style={styles.meta}>
-          {exercise.type} + {exercise.muscles.join(', ')}
-        </Text>
-      </View>
+        <View style={styles.info}>
+          <Text allowFontScaling={false} style={styles.name}>
+            {exercise.name.toUpperCase()}
+          </Text>
+          <Text allowFontScaling={false} style={styles.meta}>
+            {exercise.type} + {exercise.muscles.join(', ')}
+          </Text>
+        </View>
+      </Pressable>
 
       <TouchableOpacity
         onPress={() => onToggle(exercise.id)}
@@ -63,6 +76,15 @@ const styles = StyleSheet.create({
     height: 68,
     justifyContent: 'center',
     width: 76,
+  },
+  summaryButton: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  summaryButtonPressed: {
+    opacity: 0.82,
   },
   info: {
     flex: 1,

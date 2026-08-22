@@ -25,7 +25,8 @@
     "verify:nutrition:barcodes": "node scripts/verify-nutrition-barcodes.mjs",
     "verify:nutrition:branded-expansion": "node scripts/verify-nutrition-branded-expansion.mjs",
     "verify:nutrition:personalization": "node scripts/verify-nutrition-personalization.mjs",
-    "verify:nutrition:private-items": "node scripts/verify-nutrition-private-items.mjs"
+    "verify:nutrition:private-items": "node scripts/verify-nutrition-private-items.mjs",
+    "verify:exercises": "node scripts/verify-exercise-library.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/bebas-neue": "^0.4.1",

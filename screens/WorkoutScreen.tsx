@@ -1,4 +1,11 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
+import React, {
+  startTransition,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Text,
   FlatList,
@@ -13,26 +20,28 @@ import { Ionicons } from '@expo/vector-icons';
 import { Href, useLocalSearchParams, useRouter } from 'expo-router';
 import { WebView } from 'react-native-webview';
 import { colors, spacing, fontFamily, radius, fontSize } from '../theme';
-import { exercises as allExercises, filterTags } from '../data/exercises';
-import { Exercise } from '../types';
+import type {
+  Exercise,
+  ExerciseFilterTagId,
+} from '../lib/exercises/types';
 
 import { AppScreen } from '../components/AppScreen';
 import { SearchBar } from '../components/SearchBar';
 import { FilterChips } from '../components/FilterChips';
 import { ExerciseCard } from '../components/ExerciseCard';
 import { SelectionBar } from '../components/SelectionBar';
+import {
+  HOME_PUSH_EXERCISES,
+  HOME_PUSH_WORKOUT_ID,
+  WORKOUT_FILTERS,
+  WORKOUT_FILTER_TAGS,
+} from '../lib/exercises/constants';
+import { getExerciseBySlug, searchExercises } from '../lib/exercises/exercises';
 
 const MINUTES_PER_EXERCISE = 10;
 const INITIAL_SET_COUNT = 1;
 const STICKY_COMPLETE_BOTTOM = 124;
-const HOME_PUSH_WORKOUT_ID = 'push-strength-day';
-
-const HOME_PUSH_EXERCISES = [
-  { id: 'barbell-bench-press', setCount: 4, reps: '8', weight: '60' },
-  { id: 'overhead-press', setCount: 3, reps: '10', weight: '32.5' },
-  { id: 'cable-fly', setCount: 3, reps: '12', weight: '15' },
-  { id: 'triceps-pushdown', setCount: 3, reps: '12', weight: '20' },
-] as const;
+const SEARCH_RESULT_LIMIT = 120;
 
 type SetField = 'reps' | 'weight';
 
@@ -110,12 +119,37 @@ const normalizeSetValue = (value: string, field: SetField) => {
   return rest.length > 0 ? `${whole.slice(0, 3)}.${decimal}` : whole.slice(0, 3);
 };
 
+function getFriendlyExerciseError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return 'Unable to load exercises right now.';
+  }
+
+  if (
+    error.message.includes('EXPO_PUBLIC_SUPABASE_URL') ||
+    error.message.includes('EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY')
+  ) {
+    return error.message;
+  }
+
+  if (error.message.toLowerCase().includes('fetch')) {
+    return 'Unable to reach Supabase right now. Please try again.';
+  }
+
+  return error.message;
+}
+
 export function WorkoutScreen() {
   const router = useRouter();
   const { preset } = useLocalSearchParams<{ preset?: string }>();
   const startedPresetRef = useRef<string | null>(null);
+  const searchRequestIdRef = useRef(0);
   const [search, setSearch] = useState('');
-  const [activeFilter, setActiveFilter] = useState('all');
+  const deferredSearch = useDeferredValue(search);
+  const [activeFilter, setActiveFilter] = useState<ExerciseFilterTagId>('all');
+  const [visibleExercises, setVisibleExercises] = useState<Exercise[]>([]);
+  const [exerciseCatalog, setExerciseCatalog] = useState<Record<string, Exercise>>(
+    {},
+  );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [activeWorkout, setActiveWorkout] = useState<ActiveExercise[]>([]);
   const [activeWorkoutTitle, setActiveWorkoutTitle] = useState('Custom Workout');
@@ -125,60 +159,127 @@ export function WorkoutScreen() {
   const [tutorialExercise, setTutorialExercise] = useState<Exercise | null>(
     null,
   );
+  const [isLoadingExercises, setIsLoadingExercises] = useState(true);
+  const [hasLoadedExercises, setHasLoadedExercises] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
-  const visibleExercises = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return allExercises.filter((exercise) => {
-      const matchesFilter =
-        activeFilter === 'all' || exercise.tags.includes(activeFilter);
+  const selectedExercises = useMemo(
+    () =>
+      Array.from(selectedIds)
+        .map((id) => exerciseCatalog[id])
+        .filter((exercise): exercise is Exercise => Boolean(exercise)),
+    [exerciseCatalog, selectedIds],
+  );
 
-      const searchableText = [
-        exercise.name,
-        exercise.type,
-        exercise.muscles.join(' '),
-        exercise.tags.join(' '),
-      ]
-        .join(' ')
-        .toLowerCase();
+  const mergeExercisesIntoCatalog = (exercises: Exercise[]) => {
+    if (exercises.length === 0) {
+      return;
+    }
 
-      const matchesSearch = !q || searchableText.includes(q);
-
-      return matchesFilter && matchesSearch;
+    setExerciseCatalog((prev) => {
+      const next = { ...prev };
+      exercises.forEach((exercise) => {
+        next[exercise.id] = exercise;
+      });
+      return next;
     });
-  }, [activeFilter, search]);
+  };
+
+  useEffect(() => {
+    const requestId = searchRequestIdRef.current + 1;
+    searchRequestIdRef.current = requestId;
+    setIsLoadingExercises(true);
+
+    const timer = setTimeout(() => {
+      void searchExercises({
+        query: deferredSearch,
+        filters: WORKOUT_FILTERS[activeFilter],
+        limit: SEARCH_RESULT_LIMIT,
+      })
+        .then((results) => {
+          if (searchRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          startTransition(() => {
+            setVisibleExercises(results);
+            mergeExercisesIntoCatalog(results);
+            setLoadError(null);
+            setHasLoadedExercises(true);
+          });
+        })
+        .catch((error) => {
+          if (searchRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          setLoadError(getFriendlyExerciseError(error));
+          setHasLoadedExercises(true);
+          setVisibleExercises((current) => (current.length > 0 ? current : []));
+        })
+        .finally(() => {
+          if (searchRequestIdRef.current === requestId) {
+            setIsLoadingExercises(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [activeFilter, deferredSearch, reloadToken]);
 
   useEffect(() => {
     if (preset !== HOME_PUSH_WORKOUT_ID || startedPresetRef.current === preset) {
       return;
     }
 
-    const guidedWorkout = HOME_PUSH_EXERCISES.map((presetExercise) => {
-      const exercise = allExercises.find((item) => item.id === presetExercise.id);
+    let isCanceled = false;
 
-      if (!exercise) {
-        return null;
+    void (async () => {
+      try {
+        const guidedWorkout = (
+          await Promise.all(
+            HOME_PUSH_EXERCISES.map(async (presetExercise) => {
+              const exercise = await getExerciseBySlug(presetExercise.slug);
+
+              if (!exercise) {
+                return null;
+              }
+
+              return {
+                exercise,
+                sets: createSets(
+                  exercise.id,
+                  presetExercise.setCount,
+                  presetExercise.reps,
+                  presetExercise.weight,
+                ),
+              };
+            }),
+          )
+        ).filter((item): item is ActiveExercise => Boolean(item));
+
+        if (isCanceled || guidedWorkout.length === 0) {
+          return;
+        }
+
+        mergeExercisesIntoCatalog(guidedWorkout.map((item) => item.exercise));
+        startedPresetRef.current = preset;
+        setSelectedIds(new Set(guidedWorkout.map((item) => item.exercise.id)));
+        startWorkout(guidedWorkout, 'Push Strength Day');
+      } catch (error) {
+        if (!isCanceled) {
+          setLoadError(getFriendlyExerciseError(error));
+        }
       }
+    })();
 
-      return {
-        exercise,
-        sets: createSets(
-          exercise.id,
-          presetExercise.setCount,
-          presetExercise.reps,
-          presetExercise.weight,
-        ),
-      };
-    }).filter((item): item is ActiveExercise => Boolean(item));
-
-    if (guidedWorkout.length === 0) {
-      return;
-    }
-
-    startedPresetRef.current = preset;
-    setSelectedIds(new Set(guidedWorkout.map((item) => item.exercise.id)));
-    startWorkout(guidedWorkout, 'Push Strength Day');
+    return () => {
+      isCanceled = true;
+    };
   }, [preset]);
-
 
   const toggleExercise = (id: string) => {
     setSelectedIds((prev) => {
@@ -195,12 +296,10 @@ export function WorkoutScreen() {
   };
 
   const handleStart = () => {
-    const chosen = allExercises
-      .filter((exercise) => selectedIds.has(exercise.id))
-      .map((exercise) => ({
-        exercise,
-        sets: createInitialSets(exercise.id),
-      }));
+    const chosen = selectedExercises.map((exercise) => ({
+      exercise,
+      sets: createInitialSets(exercise.id),
+    }));
 
     startWorkout(chosen, 'Custom Workout');
   };
@@ -306,11 +405,16 @@ export function WorkoutScreen() {
     );
   };
 
+  const handleOpenExercise = (exercise: Exercise) => {
+    router.push(`/exercises/${exercise.slug}` as Href);
+  };
+
   const renderItem = ({ item }: { item: Exercise }) => (
     <ExerciseCard
       exercise={item}
       selected={selectedIds.has(item.id)}
       onToggle={toggleExercise}
+      onOpenDetails={handleOpenExercise}
     />
   );
 
@@ -404,10 +508,7 @@ export function WorkoutScreen() {
 
           <View style={styles.progressTrack}>
             <View
-              style={[
-                styles.progressFill,
-                { width: `${completionPercent}%` },
-              ]}
+              style={[styles.progressFill, { width: `${completionPercent}%` }]}
             />
           </View>
 
@@ -640,6 +741,53 @@ export function WorkoutScreen() {
     );
   }
 
+  if (!hasLoadedExercises && isLoadingExercises) {
+    return (
+      <AppScreen>
+        <View style={styles.statusCard}>
+          <Text allowFontScaling={false} style={styles.statusTitle}>
+            Loading Workout Library
+          </Text>
+          <Text allowFontScaling={false} style={styles.statusMessage}>
+            Pulling the exercise catalog from Supabase.
+          </Text>
+        </View>
+      </AppScreen>
+    );
+  }
+
+  if (
+    loadError &&
+    visibleExercises.length === 0 &&
+    Object.keys(exerciseCatalog).length === 0
+  ) {
+    return (
+      <AppScreen>
+        <View style={styles.statusCard}>
+          <Text allowFontScaling={false} style={styles.statusTitle}>
+            Workout Library Unavailable
+          </Text>
+          <Text allowFontScaling={false} style={styles.statusMessage}>
+            {loadError}
+          </Text>
+          <TouchableOpacity
+            onPress={() => {
+              setReloadToken((value) => value + 1);
+            }}
+            style={styles.retryButton}
+            activeOpacity={0.75}
+            accessibilityRole="button"
+            accessibilityLabel="Try again"
+          >
+            <Text allowFontScaling={false} style={styles.retryButtonText}>
+              Try Again
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </AppScreen>
+    );
+  }
+
   return (
     <AppScreen>
       <Text allowFontScaling={false} style={styles.screenTitle}>
@@ -651,6 +799,25 @@ export function WorkoutScreen() {
         onChangeText={setSearch}
         placeholder="Search 800+ exercises..."
       />
+
+      {loadError ? (
+        <View style={styles.statusBanner}>
+          <Text allowFontScaling={false} style={styles.statusBannerText}>
+            {loadError}
+          </Text>
+          <TouchableOpacity
+            onPress={() => setReloadToken((value) => value + 1)}
+            style={styles.statusBannerButton}
+            activeOpacity={0.75}
+            accessibilityRole="button"
+            accessibilityLabel="Retry exercise search"
+          >
+            <Text allowFontScaling={false} style={styles.statusBannerButtonText}>
+              Retry
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       <View style={styles.resultsArea}>
         <FlatList
@@ -672,9 +839,9 @@ export function WorkoutScreen() {
 
         <View style={styles.filterLayer}>
           <FilterChips
-            tags={filterTags}
+            tags={WORKOUT_FILTER_TAGS}
             selectedId={activeFilter}
-            onSelect={setActiveFilter}
+            onSelect={(id) => setActiveFilter(id as ExerciseFilterTagId)}
           />
         </View>
       </View>
@@ -700,6 +867,74 @@ const styles = StyleSheet.create({
     letterSpacing: 0,
     lineHeight: 36,
     textAlign: 'center',
+  },
+  statusBanner: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  statusBannerText: {
+    color: colors.textSecondary,
+    flex: 1,
+    fontSize: fontSize.caption,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  statusBannerButton: {
+    backgroundColor: colors.accentDark,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  statusBannerButtonText: {
+    color: colors.accent,
+    fontSize: fontSize.caption,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  statusCard: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    gap: spacing.md,
+    marginTop: spacing.xxl,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.xxl,
+  },
+  statusTitle: {
+    color: colors.textPrimary,
+    fontFamily: fontFamily.display,
+    fontSize: 32,
+    lineHeight: 36,
+    textAlign: 'center',
+  },
+  statusMessage: {
+    color: colors.textSecondary,
+    fontSize: fontSize.body,
+    lineHeight: 22,
+    textAlign: 'center',
+  },
+  retryButton: {
+    alignItems: 'center',
+    backgroundColor: colors.accent,
+    borderRadius: radius.pill,
+    minWidth: 180,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.md,
+  },
+  retryButtonText: {
+    color: colors.background,
+    fontFamily: fontFamily.display,
+    fontSize: 24,
   },
   resultsArea: {
     flex: 1,
