@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 
 const { Client: PgClient } = pg;
@@ -56,6 +57,10 @@ function createPublicClient() {
   });
 }
 
+function createEphemeralPassword(prefix) {
+  return `${prefix}-${randomBytes(12).toString('base64url')}`;
+}
+
 async function createPgClient() {
   const client = new PgClient({
     connectionString: SUPABASE_DB_URL,
@@ -100,7 +105,7 @@ async function createMailbox() {
   assertCondition(domain, 'mail.tm did not return an active domain.');
 
   const address = `oneup-auth-${Date.now()}@${domain}`;
-  const password = 'MailTmPass123!';
+  const password = createEphemeralPassword('mail');
 
   const accountResponse = await fetch('https://api.mail.tm/accounts', {
     method: 'POST',
@@ -695,7 +700,7 @@ async function main() {
   const pgClient = await createPgClient();
   const createdUserIds = [];
   const createdMailbox = await createMailbox();
-  const permanentPassword = 'AuthContinuity123!';
+  const permanentPassword = createEphemeralPassword('auth');
 
   try {
     console.log('Creating temporary verifier users...');
