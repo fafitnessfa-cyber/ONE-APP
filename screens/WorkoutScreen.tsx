@@ -7,142 +7,147 @@ import React, {
   useState,
 } from 'react';
 import {
-  Text,
+  AppState,
   FlatList,
-  Platform,
   StyleSheet,
-  ScrollView,
-  TextInput,
+  Text,
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Href, useLocalSearchParams, useRouter } from 'expo-router';
-import { WebView } from 'react-native-webview';
-import { colors, spacing, fontFamily, radius, fontSize } from '../theme';
-import type {
-  Exercise,
-  ExerciseFilterTagId,
-} from '../lib/exercises/types';
-
+import type { ProfileUnitPreference } from '../types';
 import { AppScreen } from '../components/AppScreen';
-import { SearchBar } from '../components/SearchBar';
-import { FilterChips } from '../components/FilterChips';
 import { ExerciseCard } from '../components/ExerciseCard';
+import { FilterChips } from '../components/FilterChips';
+import { SearchBar } from '../components/SearchBar';
 import { SelectionBar } from '../components/SelectionBar';
+import { ActiveWorkoutTracker } from '../components/workout/ActiveWorkoutTracker';
+import type { Exercise, ExerciseFilterTagId } from '../lib/exercises/types';
 import {
-  HOME_PUSH_EXERCISES,
   HOME_PUSH_WORKOUT_ID,
   WORKOUT_FILTERS,
   WORKOUT_FILTER_TAGS,
 } from '../lib/exercises/constants';
-import { getExerciseBySlug, searchExercises } from '../lib/exercises/exercises';
+import { searchExercises } from '../lib/exercises/exercises';
+import { useAuthProfile } from '../lib/profile/context';
+import {
+  buildDefaultTargetsForMetric,
+  convertDisplayDistanceToMeters,
+  convertDisplayWeightToKilograms,
+  formatDistanceInputFromMeters,
+  formatWeightInputFromKilograms,
+  normalizeDecimalInput,
+  normalizeIntegerInput,
+  parseDecimalInput,
+  parseIntegerInput,
+} from '../lib/workouts/calculations';
+import { ensureStarterWorkoutPlanDay } from '../lib/workouts/plans';
+import {
+  addWorkoutSet,
+  completeWorkoutSession,
+  getActiveWorkoutSession,
+  removeWorkoutSet,
+  startWorkoutSession,
+  updateWorkoutSet,
+} from '../lib/workouts/sessions';
+import { getFriendlyWorkoutError } from '../lib/workouts/shared';
+import type {
+  WorkoutSession,
+  WorkoutSet,
+  WorkoutSetDraft,
+  WorkoutSetDraftField,
+} from '../lib/workouts/types';
+import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
 
 const MINUTES_PER_EXERCISE = 10;
-const INITIAL_SET_COUNT = 1;
-const STICKY_COMPLETE_BOTTOM = 124;
 const SEARCH_RESULT_LIMIT = 120;
+const SET_SAVE_DEBOUNCE_MS = 650;
 
-type SetField = 'reps' | 'weight';
-
-interface WorkoutSet {
+interface TutorialExercise {
   id: string;
-  reps: string;
-  weight: string;
-  done: boolean;
+  name: string;
 }
 
-interface ActiveExercise {
-  exercise: Exercise;
-  sets: WorkoutSet[];
+function buildEmptySetDraft(): WorkoutSetDraft {
+  return {
+    reps: '',
+    weight: '',
+    durationSeconds: '',
+    distanceMeters: '',
+    assistanceWeight: '',
+  };
 }
 
-const getTutorialHtml = (exerciseName: string) => {
-  const query = encodeURIComponent(`${exerciseName} exercise tutorial proper form`);
+function createDraftFromSet(
+  set: WorkoutSet,
+  preferredUnits: ProfileUnitPreference | null | undefined,
+): WorkoutSetDraft {
+  return {
+    reps: set.reps == null ? '' : String(set.reps),
+    weight: formatWeightInputFromKilograms(set.weightKg, preferredUnits),
+    durationSeconds:
+      set.durationSeconds == null ? '' : String(set.durationSeconds),
+    distanceMeters: formatDistanceInputFromMeters(
+      set.distanceMeters,
+      preferredUnits,
+    ),
+    assistanceWeight: formatWeightInputFromKilograms(
+      set.assistanceWeightKg,
+      preferredUnits,
+    ),
+  };
+}
 
-  return `
-    <!doctype html>
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-          html, body {
-            background: #0D0D0D;
-            height: 100%;
-            margin: 0;
-            overflow: hidden;
+function findSessionExerciseById(
+  session: WorkoutSession | null,
+  sessionExerciseId: string,
+) {
+  return session?.exercises.find((exercise) => exercise.id === sessionExerciseId) ?? null;
+}
+
+function findSessionExerciseForSet(session: WorkoutSession | null, setId: string) {
+  if (!session) {
+    return null;
+  }
+
+  for (const exercise of session.exercises) {
+    if (exercise.sets.some((set) => set.id === setId)) {
+      return exercise;
+    }
+  }
+
+  return null;
+}
+
+function replaceUpdatedSet(session: WorkoutSession, nextSet: WorkoutSet) {
+  return {
+    ...session,
+    exercises: session.exercises.map((exercise) =>
+      exercise.id === nextSet.workoutSessionExerciseId
+        ? {
+            ...exercise,
+            sets: exercise.sets
+              .map((set) => (set.id === nextSet.id ? nextSet : set))
+              .sort((left, right) => left.setNumber - right.setNumber),
           }
-          iframe {
-            border: 0;
-            height: 100%;
-            width: 100%;
-          }
-        </style>
-      </head>
-      <body>
-        <iframe
-          src="https://www.youtube-nocookie.com/embed?listType=search&list=${query}"
-          title="${exerciseName} tutorial"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-          allowfullscreen>
-        </iframe>
-      </body>
-    </html>
-  `;
-};
-
-const createSets = (
-  exerciseId: string,
-  count: number,
-  reps: string,
-  weight = '',
-): WorkoutSet[] =>
-  Array.from({ length: count }, (_, index) => ({
-    id: `${exerciseId}-set-${index + 1}`,
-    reps,
-    weight,
-    done: false,
-  }));
-
-const createInitialSets = (exerciseId: string): WorkoutSet[] =>
-  createSets(exerciseId, INITIAL_SET_COUNT, '12');
-
-const normalizeSetValue = (value: string, field: SetField) => {
-  if (field === 'reps') {
-    return value.replace(/\D/g, '').slice(0, 3);
-  }
-
-  const numeric = value.replace(/[^0-9.]/g, '');
-  const [whole = '', ...rest] = numeric.split('.');
-  const decimal = rest.join('').slice(0, 1);
-
-  return rest.length > 0 ? `${whole.slice(0, 3)}.${decimal}` : whole.slice(0, 3);
-};
-
-function getFriendlyExerciseError(error: unknown) {
-  if (!(error instanceof Error)) {
-    return 'Unable to load exercises right now.';
-  }
-
-  if (
-    error.message.includes('EXPO_PUBLIC_SUPABASE_URL') ||
-    error.message.includes('EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY')
-  ) {
-    return error.message;
-  }
-
-  if (error.message.toLowerCase().includes('fetch')) {
-    return 'Unable to reach Supabase right now. Please try again.';
-  }
-
-  return error.message;
+        : exercise,
+    ),
+  };
 }
 
 export function WorkoutScreen() {
   const router = useRouter();
   const { preset } = useLocalSearchParams<{ preset?: string }>();
+  const { profile } = useAuthProfile();
+  const preferredUnits = profile?.preferredUnits ?? null;
   const startedPresetRef = useRef<string | null>(null);
+  const isMountedRef = useRef(true);
   const searchRequestIdRef = useRef(0);
+  const saveTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+  const activeSessionRef = useRef<WorkoutSession | null>(null);
+  const setDraftsRef = useRef<Record<string, WorkoutSetDraft>>({});
   const [search, setSearch] = useState('');
   const deferredSearch = useDeferredValue(search);
   const [activeFilter, setActiveFilter] = useState<ExerciseFilterTagId>('all');
@@ -151,18 +156,39 @@ export function WorkoutScreen() {
     {},
   );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [activeWorkout, setActiveWorkout] = useState<ActiveExercise[]>([]);
-  const [activeWorkoutTitle, setActiveWorkoutTitle] = useState('Custom Workout');
+  const [activeSession, setActiveSession] = useState<WorkoutSession | null>(null);
+  const [setDrafts, setSetDrafts] = useState<Record<string, WorkoutSetDraft>>({});
   const [expandedExerciseIds, setExpandedExerciseIds] = useState<Set<string>>(
     new Set(),
   );
-  const [tutorialExercise, setTutorialExercise] = useState<Exercise | null>(
+  const [tutorialExercise, setTutorialExercise] = useState<TutorialExercise | null>(
     null,
   );
+  const [isSelectionPausedByActiveSession, setIsSelectionPausedByActiveSession] =
+    useState(false);
   const [isLoadingExercises, setIsLoadingExercises] = useState(true);
   const [hasLoadedExercises, setHasLoadedExercises] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+  const [isLoadingActiveSession, setIsLoadingActiveSession] = useState(true);
+  const [isStartingWorkout, setIsStartingWorkout] = useState(false);
+  const [isCompletingWorkout, setIsCompletingWorkout] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
+  const [sessionReloadToken, setSessionReloadToken] = useState(0);
+  const [savingSetIds, setSavingSetIds] = useState<Set<string>>(new Set());
+  const [failedSetIds, setFailedSetIds] = useState<Set<string>>(new Set());
+
+  activeSessionRef.current = activeSession;
+  setDraftsRef.current = setDrafts;
+
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const selectedExercises = useMemo(
     () =>
@@ -177,12 +203,12 @@ export function WorkoutScreen() {
       return;
     }
 
-    setExerciseCatalog((prev) => {
-      const next = { ...prev };
+    setExerciseCatalog((previousCatalog) => {
+      const nextCatalog = { ...previousCatalog };
       exercises.forEach((exercise) => {
-        next[exercise.id] = exercise;
+        nextCatalog[exercise.id] = exercise;
       });
-      return next;
+      return nextCatalog;
     });
   };
 
@@ -214,7 +240,7 @@ export function WorkoutScreen() {
             return;
           }
 
-          setLoadError(getFriendlyExerciseError(error));
+          setLoadError(getFriendlyWorkoutError(error, 'Unable to load exercises right now.'));
           setHasLoadedExercises(true);
           setVisibleExercises((current) => (current.length > 0 ? current : []));
         })
@@ -231,178 +257,543 @@ export function WorkoutScreen() {
   }, [activeFilter, deferredSearch, reloadToken]);
 
   useEffect(() => {
-    if (preset !== HOME_PUSH_WORKOUT_ID || startedPresetRef.current === preset) {
-      return;
-    }
+    let isDisposed = false;
 
-    let isCanceled = false;
+    setIsLoadingActiveSession(true);
 
     void (async () => {
       try {
-        const guidedWorkout = (
-          await Promise.all(
-            HOME_PUSH_EXERCISES.map(async (presetExercise) => {
-              const exercise = await getExerciseBySlug(presetExercise.slug);
+        const session = await getActiveWorkoutSession();
 
-              if (!exercise) {
-                return null;
-              }
-
-              return {
-                exercise,
-                sets: createSets(
-                  exercise.id,
-                  presetExercise.setCount,
-                  presetExercise.reps,
-                  presetExercise.weight,
-                ),
-              };
-            }),
-          )
-        ).filter((item): item is ActiveExercise => Boolean(item));
-
-        if (isCanceled || guidedWorkout.length === 0) {
+        if (isDisposed) {
           return;
         }
 
-        mergeExercisesIntoCatalog(guidedWorkout.map((item) => item.exercise));
-        startedPresetRef.current = preset;
-        setSelectedIds(new Set(guidedWorkout.map((item) => item.exercise.id)));
-        startWorkout(guidedWorkout, 'Push Strength Day');
+        setActiveSession(session);
+        setSessionError(null);
+        setSelectedIds(
+          new Set(session?.exercises.map((exercise) => exercise.exerciseId) ?? []),
+        );
+        if (session) {
+          setExpandedExerciseIds(
+            new Set(session.exercises.map((exercise) => exercise.id)),
+          );
+        } else {
+          setExpandedExerciseIds(new Set());
+          setIsSelectionPausedByActiveSession(false);
+        }
       } catch (error) {
-        if (!isCanceled) {
-          setLoadError(getFriendlyExerciseError(error));
+        if (!isDisposed) {
+          setSessionError(getFriendlyWorkoutError(error));
+        }
+      } finally {
+        if (!isDisposed) {
+          setIsLoadingActiveSession(false);
         }
       }
     })();
 
     return () => {
-      isCanceled = true;
+      isDisposed = true;
     };
-  }, [preset]);
+  }, [sessionReloadToken]);
 
-  const toggleExercise = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
+  useEffect(() => {
+    if (!activeSession) {
+      setSetDrafts({});
+      return;
+    }
+
+    setSetDrafts((currentDrafts) => {
+      const nextDrafts: Record<string, WorkoutSetDraft> = {};
+
+      activeSession.exercises.forEach((exercise) => {
+        exercise.sets.forEach((set) => {
+          nextDrafts[set.id] =
+            currentDrafts[set.id] ??
+            createDraftFromSet(set, preferredUnits);
+        });
+      });
+
+      return nextDrafts;
     });
+
+    const missingExerciseIds = activeSession.exercises
+      .map((exercise) => exercise.exerciseId)
+      .filter((exerciseId) => !exerciseCatalog[exerciseId]);
+
+    if (missingExerciseIds.length === 0) {
+      return;
+    }
+
+    void (async () => {
+      const results = await Promise.all(
+        missingExerciseIds.map((exerciseId) =>
+          searchExercises({ exerciseId, limit: 1 }),
+        ),
+      );
+      mergeExercisesIntoCatalog(results.flat());
+    })().catch(() => {
+      // Keep session rendering from snapshots even if metadata hydration fails.
+    });
+  }, [activeSession, exerciseCatalog, preferredUnits]);
+
+  async function persistSetFromDraft(
+    setId: string,
+    overrideIsCompleted?: boolean,
+  ) {
+    const currentSession = activeSessionRef.current;
+    const currentDrafts = setDraftsRef.current;
+    const sessionExercise = findSessionExerciseForSet(currentSession, setId);
+    const existingSet = sessionExercise?.sets.find((set) => set.id === setId);
+
+    if (!currentSession || !sessionExercise || !existingSet) {
+      return;
+    }
+
+    const draft = currentDrafts[setId] ?? buildEmptySetDraft();
+    const nextWeight =
+      sessionExercise.loadTypeSnapshot === 'bodyweight'
+        ? null
+        : convertDisplayWeightToKilograms(
+            parseDecimalInput(draft.weight),
+            preferredUnits,
+          );
+    const nextAssistance =
+      sessionExercise.loadTypeSnapshot === 'assisted'
+        ? convertDisplayWeightToKilograms(
+            parseDecimalInput(draft.assistanceWeight),
+            preferredUnits,
+          )
+        : null;
+    const nextDistance =
+      sessionExercise.trackingMetricSnapshot === 'distance_duration'
+        ? convertDisplayDistanceToMeters(
+            parseDecimalInput(draft.distanceMeters),
+            preferredUnits,
+          )
+        : null;
+
+    setSavingSetIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.add(setId);
+      return nextIds;
+    });
+    setFailedSetIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.delete(setId);
+      return nextIds;
+    });
+
+    try {
+      const updatedSet = await updateWorkoutSet({
+        setId,
+        reps:
+          sessionExercise.trackingMetricSnapshot === 'duration' ||
+          sessionExercise.trackingMetricSnapshot === 'distance_duration'
+            ? null
+            : parseIntegerInput(draft.reps),
+        weightKg: nextWeight,
+        durationSeconds:
+          sessionExercise.trackingMetricSnapshot === 'duration' ||
+          sessionExercise.trackingMetricSnapshot === 'distance_duration'
+            ? parseIntegerInput(draft.durationSeconds)
+            : null,
+        distanceMeters: nextDistance,
+        assistanceWeightKg: nextAssistance,
+        isCompleted: overrideIsCompleted ?? existingSet.isCompleted,
+      });
+
+      setActiveSession((currentSessionState) =>
+        currentSessionState
+          ? replaceUpdatedSet(currentSessionState, updatedSet)
+          : currentSessionState,
+      );
+      setSessionError(null);
+    } catch (error) {
+      setSessionError(getFriendlyWorkoutError(error));
+      setFailedSetIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.add(setId);
+        return nextIds;
+      });
+    } finally {
+      setSavingSetIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.delete(setId);
+        return nextIds;
+      });
+    }
+  }
+
+  async function flushPendingSetSaves() {
+    const pendingSetIds = Array.from(saveTimeoutsRef.current.keys());
+    pendingSetIds.forEach((setId) => {
+      const timeout = saveTimeoutsRef.current.get(setId);
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      saveTimeoutsRef.current.delete(setId);
+    });
+
+    await Promise.all(pendingSetIds.map((setId) => persistSetFromDraft(setId)));
+  }
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') {
+        void flushPendingSetSaves();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+      saveTimeoutsRef.current.forEach((timeout) => clearTimeout(timeout));
+      saveTimeoutsRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      preset !== HOME_PUSH_WORKOUT_ID ||
+      startedPresetRef.current === preset ||
+      isLoadingActiveSession ||
+      isStartingWorkout
+    ) {
+      return;
+    }
+
+    if (activeSession) {
+      startedPresetRef.current = preset;
+      setIsSelectionPausedByActiveSession(false);
+      setSessionMessage('Resumed your active workout instead of starting a second one.');
+      return;
+    }
+
+    setIsStartingWorkout(true);
+    void (async () => {
+      try {
+        const starterDay = await ensureStarterWorkoutPlanDay();
+        const { session, wasResumed } = await startWorkoutSession({
+          workoutPlanDayId: starterDay.id,
+        });
+
+        if (!isMountedRef.current) {
+          return;
+        }
+
+        startedPresetRef.current = preset;
+        setActiveSession(session);
+        setSelectedIds(
+          new Set(session.exercises.map((exercise) => exercise.exerciseId)),
+        );
+        setExpandedExerciseIds(
+          new Set(session.exercises.map((exercise) => exercise.id)),
+        );
+        setIsSelectionPausedByActiveSession(false);
+        setSessionMessage(
+          wasResumed
+            ? 'Resumed your active workout instead of starting a second one.'
+            : null,
+        );
+        setSessionError(null);
+      } catch (error) {
+        if (isMountedRef.current) {
+          setSessionError(getFriendlyWorkoutError(error));
+        }
+      } finally {
+        if (isMountedRef.current) {
+          setIsStartingWorkout(false);
+        }
+      }
+    })();
+  }, [activeSession, isLoadingActiveSession, preset]);
+
+  const scheduleSetSave = (setId: string) => {
+    const existingTimeout = saveTimeoutsRef.current.get(setId);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+    }
+
+    const timeout = setTimeout(() => {
+      saveTimeoutsRef.current.delete(setId);
+      void persistSetFromDraft(setId);
+    }, SET_SAVE_DEBOUNCE_MS);
+
+    saveTimeoutsRef.current.set(setId, timeout);
   };
 
-  const startWorkout = (workout: ActiveExercise[], title: string) => {
-    setActiveWorkout(workout);
-    setActiveWorkoutTitle(title);
-    setExpandedExerciseIds(new Set(workout.map((item) => item.exercise.id)));
-  };
+  const handleStart = async () => {
+    if (selectedExercises.length === 0) {
+      return;
+    }
 
-  const handleStart = () => {
-    const chosen = selectedExercises.map((exercise) => ({
-      exercise,
-      sets: createInitialSets(exercise.id),
-    }));
+    setIsStartingWorkout(true);
+    setSessionError(null);
+    setSessionMessage(null);
 
-    startWorkout(chosen, 'Custom Workout');
-  };
+    try {
+      const { session, wasResumed } = await startWorkoutSession({
+        sessionName: 'Custom Workout',
+        exercises: selectedExercises.map((exercise, index) => {
+          const defaults = buildDefaultTargetsForMetric(
+            exercise.primaryTrackingMetric as Parameters<
+              typeof buildDefaultTargetsForMetric
+            >[0],
+          );
 
-  const clearActiveWorkout = () => {
-    startedPresetRef.current = null;
-    setActiveWorkout([]);
-    setActiveWorkoutTitle('Custom Workout');
-    setTutorialExercise(null);
-    setExpandedExerciseIds(new Set());
-    router.replace('/workout' as Href);
+          return {
+            exerciseId: exercise.id,
+            position: index + 1,
+            ...defaults,
+          };
+        }),
+      });
+
+      setActiveSession(session);
+      setSelectedIds(
+        new Set(session.exercises.map((exercise) => exercise.exerciseId)),
+      );
+      setExpandedExerciseIds(
+        new Set(session.exercises.map((exercise) => exercise.id)),
+      );
+      setIsSelectionPausedByActiveSession(false);
+      setSessionMessage(
+        wasResumed
+          ? 'Resumed your active workout instead of starting a second one.'
+          : null,
+      );
+    } catch (error) {
+      setSessionError(getFriendlyWorkoutError(error));
+    } finally {
+      setIsStartingWorkout(false);
+    }
   };
 
   const handleBackToSelection = () => {
-    clearActiveWorkout();
+    void flushPendingSetSaves();
+    setTutorialExercise(null);
+    setIsSelectionPausedByActiveSession(true);
+    setSessionMessage('Workout still active. Resume anytime.');
   };
 
-  const handleCompleteWorkout = () => {
-    clearActiveWorkout();
-    setSelectedIds(new Set());
+  const handleResumeActiveSession = () => {
+    setIsSelectionPausedByActiveSession(false);
+    setSessionMessage(null);
   };
 
-  const handleToggleExerciseSets = (exerciseId: string) => {
-    setExpandedExerciseIds((prev) => {
-      const next = new Set(prev);
-      next.has(exerciseId) ? next.delete(exerciseId) : next.add(exerciseId);
-      return next;
+  const handleFieldChange = (
+    setId: string,
+    field: WorkoutSetDraftField,
+    value: string,
+  ) => {
+    const nextValue =
+      field === 'reps' || field === 'durationSeconds'
+        ? normalizeIntegerInput(value)
+        : normalizeDecimalInput(value, field === 'distanceMeters' ? 5 : 4, 2);
+
+    setSetDrafts((currentDrafts) => ({
+      ...currentDrafts,
+      [setId]: {
+        ...(currentDrafts[setId] ?? buildEmptySetDraft()),
+        [field]: nextValue,
+      },
+    }));
+    scheduleSetSave(setId);
+  };
+
+  const handleFieldBlur = (setId: string) => {
+    const timeout = saveTimeoutsRef.current.get(setId);
+    if (timeout) {
+      clearTimeout(timeout);
+      saveTimeoutsRef.current.delete(setId);
+    }
+    void persistSetFromDraft(setId);
+  };
+
+  const handleToggleSetDone = (setId: string, isCompleted: boolean) => {
+    const timeout = saveTimeoutsRef.current.get(setId);
+    if (timeout) {
+      clearTimeout(timeout);
+      saveTimeoutsRef.current.delete(setId);
+    }
+
+    setActiveSession((currentSession) => {
+      if (!currentSession) {
+        return currentSession;
+      }
+
+      return {
+        ...currentSession,
+        exercises: currentSession.exercises.map((exercise) => ({
+          ...exercise,
+          sets: exercise.sets.map((set) =>
+            set.id === setId
+              ? {
+                  ...set,
+                  isCompleted,
+                  completedAt: isCompleted ? new Date().toISOString() : null,
+                }
+              : set,
+          ),
+        })),
+      };
+    });
+
+    void persistSetFromDraft(setId, isCompleted);
+  };
+
+  const handleToggleExerciseSets = (sessionExerciseId: string) => {
+    setExpandedExerciseIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      nextIds.has(sessionExerciseId)
+        ? nextIds.delete(sessionExerciseId)
+        : nextIds.add(sessionExerciseId);
+      return nextIds;
     });
   };
 
-  const handleAddSet = (exerciseId: string) => {
-    setActiveWorkout((prev) =>
-      prev.map((item) => {
-        if (item.exercise.id !== exerciseId) {
-          return item;
-        }
+  const handleAddSet = async (sessionExerciseId: string) => {
+    const sessionExercise = findSessionExerciseById(activeSession, sessionExerciseId);
+    const lastSet = sessionExercise?.sets[sessionExercise.sets.length - 1];
+    if (!activeSession || !sessionExercise || !lastSet) {
+      return;
+    }
 
-        const lastSet = item.sets[item.sets.length - 1];
+    const lastDraft = setDrafts[lastSet.id] ?? buildEmptySetDraft();
 
-        return {
-          ...item,
-          sets: [
-            ...item.sets,
-            {
-              id: `${exerciseId}-set-${Date.now()}`,
-              reps: lastSet?.reps ?? '10',
-              weight: lastSet?.weight ?? '',
-              done: false,
-            },
-          ],
-        };
-      }),
-    );
-  };
+    try {
+      const createdSet = await addWorkoutSet({
+        workoutSessionId: activeSession.id,
+        workoutSessionExerciseId: sessionExercise.id,
+        exerciseId: sessionExercise.exerciseId,
+        setNumber: lastSet.setNumber + 1,
+        setType: lastSet.setType,
+        weightKg: convertDisplayWeightToKilograms(
+          parseDecimalInput(lastDraft.weight),
+          preferredUnits,
+        ),
+        reps: parseIntegerInput(lastDraft.reps),
+        durationSeconds: parseIntegerInput(lastDraft.durationSeconds),
+        distanceMeters: convertDisplayDistanceToMeters(
+          parseDecimalInput(lastDraft.distanceMeters),
+          preferredUnits,
+        ),
+        assistanceWeightKg: convertDisplayWeightToKilograms(
+          parseDecimalInput(lastDraft.assistanceWeight),
+          preferredUnits,
+        ),
+        bodyweightKgSnapshot: lastSet.bodyweightKgSnapshot,
+        plannedRepsMin: lastSet.plannedRepsMin,
+        plannedRepsMax: lastSet.plannedRepsMax,
+        plannedWeightKg: lastSet.plannedWeightKg,
+        plannedDurationSeconds: lastSet.plannedDurationSeconds,
+        plannedDistanceMeters: lastSet.plannedDistanceMeters,
+      });
 
-  const handleRemoveSet = (exerciseId: string) => {
-    setActiveWorkout((prev) =>
-      prev.map((item) =>
-        item.exercise.id === exerciseId && item.sets.length > 1
+      setActiveSession((currentSession) =>
+        currentSession
           ? {
-              ...item,
-              sets: item.sets.slice(0, -1),
-            }
-          : item,
-      ),
-    );
-  };
-
-  const handleSetValueChange = (
-    exerciseId: string,
-    setId: string,
-    field: SetField,
-    value: string,
-  ) => {
-    const nextValue = normalizeSetValue(value, field);
-
-    setActiveWorkout((prev) =>
-      prev.map((item) =>
-        item.exercise.id === exerciseId
-          ? {
-              ...item,
-              sets: item.sets.map((set) =>
-                set.id === setId ? { ...set, [field]: nextValue } : set,
+              ...currentSession,
+              exercises: currentSession.exercises.map((exercise) =>
+                exercise.id === sessionExercise.id
+                  ? {
+                      ...exercise,
+                      sets: [...exercise.sets, createdSet].sort(
+                        (left, right) => left.setNumber - right.setNumber,
+                      ),
+                    }
+                  : exercise,
               ),
             }
-          : item,
-      ),
-    );
+          : currentSession,
+      );
+      setSetDrafts((currentDrafts) => ({
+        ...currentDrafts,
+        [createdSet.id]: createDraftFromSet(createdSet, preferredUnits),
+      }));
+      setSessionError(null);
+    } catch (error) {
+      setSessionError(getFriendlyWorkoutError(error));
+    }
   };
 
-  const handleToggleSetDone = (exerciseId: string, setId: string) => {
-    setActiveWorkout((prev) =>
-      prev.map((item) =>
-        item.exercise.id === exerciseId
+  const handleRemoveSet = async (sessionExerciseId: string) => {
+    const sessionExercise = findSessionExerciseById(activeSession, sessionExerciseId);
+    const targetSet = sessionExercise?.sets[sessionExercise.sets.length - 1];
+    if (!activeSession || !sessionExercise || !targetSet || sessionExercise.sets.length <= 1) {
+      return;
+    }
+
+    const timeout = saveTimeoutsRef.current.get(targetSet.id);
+    if (timeout) {
+      clearTimeout(timeout);
+      saveTimeoutsRef.current.delete(targetSet.id);
+    }
+
+    try {
+      await removeWorkoutSet(targetSet.id);
+
+      setActiveSession((currentSession) =>
+        currentSession
           ? {
-              ...item,
-              sets: item.sets.map((set) =>
-                set.id === setId ? { ...set, done: !set.done } : set,
+              ...currentSession,
+              exercises: currentSession.exercises.map((exercise) =>
+                exercise.id === sessionExercise.id
+                  ? {
+                      ...exercise,
+                      sets: exercise.sets.slice(0, -1),
+                    }
+                  : exercise,
               ),
             }
-          : item,
-      ),
-    );
+          : currentSession,
+      );
+      setSetDrafts((currentDrafts) => {
+        const nextDrafts = { ...currentDrafts };
+        delete nextDrafts[targetSet.id];
+        return nextDrafts;
+      });
+      setFailedSetIds((currentIds) => {
+        const nextIds = new Set(currentIds);
+        nextIds.delete(targetSet.id);
+        return nextIds;
+      });
+      setSessionError(null);
+    } catch (error) {
+      setSessionError(getFriendlyWorkoutError(error));
+    }
+  };
+
+  const handleRetrySync = () => {
+    void flushPendingSetSaves();
+  };
+
+  const handleCompleteWorkout = async () => {
+    if (!activeSession) {
+      return;
+    }
+
+    setIsCompletingWorkout(true);
+    setSessionError(null);
+
+    try {
+      await flushPendingSetSaves();
+      await completeWorkoutSession(activeSession.id);
+      startedPresetRef.current = null;
+      setActiveSession(null);
+      setSetDrafts({});
+      setSelectedIds(new Set());
+      setExpandedExerciseIds(new Set());
+      setTutorialExercise(null);
+      setIsSelectionPausedByActiveSession(false);
+      setSessionMessage('Workout saved to history.');
+      router.replace('/workout' as Href);
+    } catch (error) {
+      setSessionError(getFriendlyWorkoutError(error));
+    } finally {
+      setIsCompletingWorkout(false);
+    }
   };
 
   const handleOpenExercise = (exercise: Exercise) => {
@@ -413,331 +804,61 @@ export function WorkoutScreen() {
     <ExerciseCard
       exercise={item}
       selected={selectedIds.has(item.id)}
-      onToggle={toggleExercise}
+      onToggle={(id) => {
+        setSelectedIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+          nextIds.has(id) ? nextIds.delete(id) : nextIds.add(id);
+          return nextIds;
+        });
+      }}
       onOpenDetails={handleOpenExercise}
     />
   );
 
-  const totalSets = activeWorkout.reduce(
-    (total, item) => total + item.sets.length,
-    0,
-  );
-  const completedSets = activeWorkout.reduce(
-    (total, item) => total + item.sets.filter((set) => set.done).length,
-    0,
-  );
-  const completionPercent =
-    totalSets === 0 ? 0 : Math.round((completedSets / totalSets) * 100);
+  const isActiveSessionVisible =
+    activeSession != null && !isSelectionPausedByActiveSession;
 
-  if (tutorialExercise) {
+  if (isLoadingActiveSession) {
     return (
       <AppScreen>
-        <View style={styles.activeHeader}>
-          <TouchableOpacity
-            onPress={() => setTutorialExercise(null)}
-            style={styles.iconButton}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel="Back to active workout"
-          >
-            <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
-          </TouchableOpacity>
-
-          <View style={styles.activeTitleBlock}>
-            <Text allowFontScaling={false} style={styles.activeEyebrow}>
-              VIDEO TUTORIAL
-            </Text>
-            <Text allowFontScaling={false} style={styles.tutorialTitle}>
-              {tutorialExercise.name}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.videoFrame}>
-          <WebView
-            allowsFullscreenVideo
-            javaScriptEnabled
-            domStorageEnabled
-            mediaPlaybackRequiresUserAction={Platform.OS !== 'web'}
-            originWhitelist={['*']}
-            source={{ html: getTutorialHtml(tutorialExercise.name) }}
-            style={styles.video}
-          />
+        <View style={styles.statusCard}>
+          <Text allowFontScaling={false} style={styles.statusTitle}>
+            Loading Workout
+          </Text>
+          <Text allowFontScaling={false} style={styles.statusMessage}>
+            Restoring your workout session from Supabase.
+          </Text>
         </View>
       </AppScreen>
     );
   }
 
-  if (activeWorkout.length > 0) {
+  if (isActiveSessionVisible && activeSession) {
     return (
-      <AppScreen>
-        <View style={styles.activeHeader}>
-          <TouchableOpacity
-            onPress={handleBackToSelection}
-            style={styles.iconButton}
-            activeOpacity={0.7}
-            accessibilityRole="button"
-            accessibilityLabel="Back to exercise selection"
-          >
-            <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
-          </TouchableOpacity>
-
-          <View style={styles.activeTitleBlock}>
-            <Text allowFontScaling={false} style={styles.activeEyebrow}>
-              ACTIVE WORKOUT
-            </Text>
-            <Text allowFontScaling={false} style={styles.activeTitle}>
-              {activeWorkoutTitle}
-            </Text>
-            <Text allowFontScaling={false} style={styles.activeSubtitle}>
-              {activeWorkout.length} Exercise
-              {activeWorkout.length === 1 ? '' : 's'}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.progressPanel}>
-          <View style={styles.progressCopy}>
-            <Text allowFontScaling={false} style={styles.progressLabel}>
-              Overall Progress
-            </Text>
-            <Text allowFontScaling={false} style={styles.progressValue}>
-              {completionPercent}%
-            </Text>
-          </View>
-
-          <View style={styles.progressTrack}>
-            <View
-              style={[styles.progressFill, { width: `${completionPercent}%` }]}
-            />
-          </View>
-
-          <Text allowFontScaling={false} style={styles.progressMeta}>
-            {completedSets} of {totalSets} sets done
-          </Text>
-        </View>
-
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.activeList}
-        >
-          {activeWorkout.map((item) => (
-            <View key={item.exercise.id} style={styles.exerciseTracker}>
-              <TouchableOpacity
-                onPress={() => handleToggleExerciseSets(item.exercise.id)}
-                style={styles.trackerHeader}
-                activeOpacity={0.75}
-                accessibilityRole="button"
-                accessibilityState={{
-                  expanded: expandedExerciseIds.has(item.exercise.id),
-                }}
-                accessibilityLabel={`Toggle sets for ${item.exercise.name}`}
-              >
-                <View style={styles.trackerIcon}>
-                  <Ionicons
-                    name="barbell-outline"
-                    size={22}
-                    color={colors.accent}
-                  />
-                </View>
-
-                <View style={styles.trackerCopy}>
-                  <Text allowFontScaling={false} style={styles.trackerTitle}>
-                    {item.exercise.name}
-                  </Text>
-                  <Text allowFontScaling={false} style={styles.trackerMeta}>
-                    {item.sets.length} Set{item.sets.length === 1 ? '' : 's'} +{' '}
-                    {item.exercise.muscles.join(', ')}
-                  </Text>
-                </View>
-
-                <Ionicons
-                  name={
-                    expandedExerciseIds.has(item.exercise.id)
-                      ? 'chevron-up'
-                      : 'chevron-down'
-                  }
-                  size={22}
-                  color={colors.textSecondary}
-                />
-              </TouchableOpacity>
-
-              <View style={styles.trackerActions}>
-                <TouchableOpacity
-                  onPress={() => setTutorialExercise(item.exercise)}
-                  style={styles.tutorialButton}
-                  activeOpacity={0.75}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Watch tutorial for ${item.exercise.name}`}
-                >
-                  <Ionicons name="play" size={17} color={colors.background} />
-                  <Text allowFontScaling={false} style={styles.tutorialButtonText}>
-                    Tutorial
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {expandedExerciseIds.has(item.exercise.id) && (
-                <View style={styles.setDropdown}>
-                  <View style={styles.setHeader}>
-                    <View style={styles.setDoneColumn}>
-                      <Text allowFontScaling={false} style={styles.setHeaderText}>
-                        DONE
-                      </Text>
-                    </View>
-                    <View style={styles.setValueColumn}>
-                      <Text allowFontScaling={false} style={styles.setHeaderText}>
-                        SET
-                      </Text>
-                    </View>
-                    <View style={styles.setValueColumn}>
-                      <Text allowFontScaling={false} style={styles.setHeaderText}>
-                        REPS
-                      </Text>
-                    </View>
-                    <View style={styles.setValueColumn}>
-                      <Text allowFontScaling={false} style={styles.setHeaderText}>
-                        KG
-                      </Text>
-                    </View>
-                  </View>
-
-                  {item.sets.map((set, index) => (
-                    <View key={set.id} style={styles.setRow}>
-                      <View style={styles.setDoneColumn}>
-                        <TouchableOpacity
-                          onPress={() =>
-                            handleToggleSetDone(item.exercise.id, set.id)
-                          }
-                          style={[
-                            styles.checkboxButton,
-                            set.done && styles.checkboxButtonActive,
-                          ]}
-                          activeOpacity={0.75}
-                          accessibilityRole="checkbox"
-                          accessibilityState={{ checked: set.done }}
-                          accessibilityLabel={`Mark set ${index + 1} of ${item.exercise.name} as done`}
-                        >
-                          {set.done && (
-                            <Ionicons
-                              name="checkmark"
-                              size={18}
-                              color={colors.background}
-                            />
-                          )}
-                        </TouchableOpacity>
-                      </View>
-
-                      <View style={styles.setValueColumn}>
-                        <View style={styles.setNumber}>
-                          <Text
-                            allowFontScaling={false}
-                            style={styles.setNumberText}
-                          >
-                            {index + 1}
-                          </Text>
-                        </View>
-                      </View>
-
-                      <View style={styles.setValueColumn}>
-                        <TextInput
-                          allowFontScaling={false}
-                          value={set.reps}
-                          onChangeText={(value) =>
-                            handleSetValueChange(
-                              item.exercise.id,
-                              set.id,
-                              'reps',
-                              value,
-                            )
-                          }
-                          keyboardType="number-pad"
-                          placeholder="0"
-                          placeholderTextColor={colors.textMuted}
-                          style={[styles.setInput, set.done && styles.setInputDone]}
-                          textAlign="center"
-                        />
-                      </View>
-
-                      <View style={styles.setValueColumn}>
-                        <TextInput
-                          allowFontScaling={false}
-                          value={set.weight}
-                          onChangeText={(value) =>
-                            handleSetValueChange(
-                              item.exercise.id,
-                              set.id,
-                              'weight',
-                              value,
-                            )
-                          }
-                          keyboardType="decimal-pad"
-                          placeholder="0"
-                          placeholderTextColor={colors.textMuted}
-                          style={[styles.setInput, set.done && styles.setInputDone]}
-                          textAlign="center"
-                        />
-                      </View>
-                    </View>
-                  ))}
-
-                  <View style={styles.setActions}>
-                    <TouchableOpacity
-                      onPress={() => handleAddSet(item.exercise.id)}
-                      style={styles.addSetButton}
-                      activeOpacity={0.75}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Add set to ${item.exercise.name}`}
-                    >
-                      <View style={styles.addSetIcon}>
-                        <Ionicons name="add" size={20} color={colors.textPrimary} />
-                      </View>
-                      <Text allowFontScaling={false} style={styles.addSetText}>
-                        Add Set
-                      </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      onPress={() => handleRemoveSet(item.exercise.id)}
-                      style={[
-                        styles.minusSetButton,
-                        item.sets.length === 1 && styles.minusSetButtonDisabled,
-                      ]}
-                      disabled={item.sets.length === 1}
-                      activeOpacity={0.75}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Remove set from ${item.exercise.name}`}
-                    >
-                      <View style={styles.minusSetIcon}>
-                        <Ionicons name="remove" size={20} color={colors.textPrimary} />
-                      </View>
-                      <Text allowFontScaling={false} style={styles.minusSetText}>
-                        Minus Set
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              )}
-            </View>
-          ))}
-        </ScrollView>
-
-        <View style={styles.stickyCompleteBar}>
-          <TouchableOpacity
-            style={[
-              styles.finishButton,
-              completionPercent < 100 && styles.finishButtonDisabled,
-            ]}
-            onPress={handleCompleteWorkout}
-            disabled={completionPercent < 100}
-            activeOpacity={0.8}
-          >
-            <Text allowFontScaling={false} style={styles.finishButtonText}>
-              COMPLETE WORKOUT
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </AppScreen>
+      <ActiveWorkoutTracker
+        expandedExerciseIds={expandedExerciseIds}
+        exerciseCatalog={exerciseCatalog}
+        failedSetIds={failedSetIds}
+        isCompletingWorkout={isCompletingWorkout}
+        preferredUnits={preferredUnits}
+        savingSetIds={savingSetIds}
+        session={activeSession}
+        setDrafts={setDrafts}
+        tutorialExercise={tutorialExercise}
+        onAddSet={handleAddSet}
+        onBackToSelection={handleBackToSelection}
+        onCloseTutorial={() => setTutorialExercise(null)}
+        onCompleteWorkout={() => {
+          void handleCompleteWorkout();
+        }}
+        onFieldBlur={handleFieldBlur}
+        onFieldChange={handleFieldChange}
+        onOpenTutorial={setTutorialExercise}
+        onRemoveSet={handleRemoveSet}
+        onRetrySync={handleRetrySync}
+        onToggleExerciseSets={handleToggleExerciseSets}
+        onToggleSetDone={handleToggleSetDone}
+      />
     );
   }
 
@@ -771,9 +892,7 @@ export function WorkoutScreen() {
             {loadError}
           </Text>
           <TouchableOpacity
-            onPress={() => {
-              setReloadToken((value) => value + 1);
-            }}
+            onPress={() => setReloadToken((value) => value + 1)}
             style={styles.retryButton}
             activeOpacity={0.75}
             accessibilityRole="button"
@@ -800,6 +919,25 @@ export function WorkoutScreen() {
         placeholder="Search 800+ exercises..."
       />
 
+      {sessionError ? (
+        <View style={styles.statusBanner}>
+          <Text allowFontScaling={false} style={styles.statusBannerText}>
+            {sessionError}
+          </Text>
+          <TouchableOpacity
+            onPress={() => setSessionReloadToken((value) => value + 1)}
+            style={styles.statusBannerButton}
+            activeOpacity={0.75}
+            accessibilityRole="button"
+            accessibilityLabel="Retry workout session load"
+          >
+            <Text allowFontScaling={false} style={styles.statusBannerButtonText}>
+              Retry
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
       {loadError ? (
         <View style={styles.statusBanner}>
           <Text allowFontScaling={false} style={styles.statusBannerText}>
@@ -816,6 +954,33 @@ export function WorkoutScreen() {
               Retry
             </Text>
           </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {activeSession ? (
+        <View style={styles.statusBanner}>
+          <Text allowFontScaling={false} style={styles.statusBannerText}>
+            {sessionMessage ?? `${activeSession.nameSnapshot} is still active.`}
+          </Text>
+          <TouchableOpacity
+            onPress={handleResumeActiveSession}
+            style={styles.statusBannerButton}
+            activeOpacity={0.75}
+            accessibilityRole="button"
+            accessibilityLabel="Resume active workout"
+          >
+            <Text allowFontScaling={false} style={styles.statusBannerButtonText}>
+              Resume
+            </Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {isStartingWorkout ? (
+        <View style={styles.sessionMetaWrap}>
+          <Text allowFontScaling={false} style={styles.sessionMetaText}>
+            Starting workout...
+          </Text>
         </View>
       ) : null}
 
@@ -846,82 +1011,56 @@ export function WorkoutScreen() {
         </View>
       </View>
 
-      {selectedIds.size > 0 && (
+      {selectedIds.size > 0 ? (
         <View style={styles.floatingBar}>
           <SelectionBar
             count={selectedIds.size}
             estimatedMinutes={selectedIds.size * MINUTES_PER_EXERCISE}
-            onStart={handleStart}
+            onStart={() => {
+              void handleStart();
+            }}
           />
         </View>
-      )}
+      ) : null}
     </AppScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  screenTitle: {
-    color: colors.textPrimary,
-    fontFamily: fontFamily.display,
-    fontSize: 32,
-    letterSpacing: 0,
-    lineHeight: 36,
+  empty: {
+    color: colors.textSecondary,
+    marginTop: spacing.xl,
     textAlign: 'center',
   },
-  statusBanner: {
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    flexDirection: 'row',
-    gap: spacing.md,
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  statusBannerText: {
-    color: colors.textSecondary,
+  exerciseList: {
     flex: 1,
-    fontSize: fontSize.caption,
-    fontWeight: '700',
-    lineHeight: 18,
   },
-  statusBannerButton: {
-    backgroundColor: colors.accentDark,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+  filterLayer: {
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    zIndex: 2,
   },
-  statusBannerButtonText: {
-    color: colors.accent,
-    fontSize: fontSize.caption,
-    fontWeight: '900',
-    textTransform: 'uppercase',
+  floatingBar: {
+    bottom: 140,
+    left: spacing.lg,
+    position: 'absolute',
+    right: spacing.lg,
   },
-  statusCard: {
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    borderWidth: 1,
+  list: {
     gap: spacing.md,
-    marginTop: spacing.xxl,
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.xxl,
+    paddingBottom: 260,
+    paddingHorizontal: spacing.xs,
+    paddingTop: 68,
   },
-  statusTitle: {
-    color: colors.textPrimary,
-    fontFamily: fontFamily.display,
-    fontSize: 32,
-    lineHeight: 36,
-    textAlign: 'center',
+  listWithoutSelection: {
+    paddingBottom: 140,
   },
-  statusMessage: {
-    color: colors.textSecondary,
-    fontSize: fontSize.body,
-    lineHeight: 22,
-    textAlign: 'center',
+  resultsArea: {
+    flex: 1,
+    marginHorizontal: -spacing.xs,
+    position: 'relative',
   },
   retryButton: {
     alignItems: 'center',
@@ -936,344 +1075,76 @@ const styles = StyleSheet.create({
     fontFamily: fontFamily.display,
     fontSize: 24,
   },
-  resultsArea: {
-    flex: 1,
-    marginHorizontal: -spacing.xs,
-    position: 'relative',
-  },
-  exerciseList: {
-    flex: 1,
-  },
-  list: {
-    gap: spacing.md,
-    paddingBottom: 260,
-    paddingHorizontal: spacing.xs,
-    paddingTop: 68,
-  },
-  listWithoutSelection: {
-    paddingBottom: 140,
-  },
-  empty: {
-    color: colors.textSecondary,
-    textAlign: 'center',
-    marginTop: spacing.xl,
-  },
-  floatingBar: {
-    position: 'absolute',
-    left: spacing.lg,
-    right: spacing.lg,
-    bottom: 140,
-  },
-  filterLayer: {
-    left: 0,
-    position: 'absolute',
-    right: 0,
-    top: 0,
-    zIndex: 2,
-  },
-  activeHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.md,
-  },
-  iconButton: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
-    borderColor: colors.border,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    height: 44,
-    justifyContent: 'center',
-    width: 44,
-  },
-  activeTitleBlock: {
-    flex: 1,
-  },
-  activeEyebrow: {
-    color: colors.accent,
-    fontSize: fontSize.caption,
-    fontWeight: '800',
-    letterSpacing: 0,
-    textTransform: 'uppercase',
-  },
-  activeTitle: {
+  screenTitle: {
     color: colors.textPrimary,
     fontFamily: fontFamily.display,
-    fontSize: 34,
+    fontSize: 32,
     letterSpacing: 0,
-    lineHeight: 38,
+    lineHeight: 36,
+    textAlign: 'center',
   },
-  activeSubtitle: {
+  sessionMetaText: {
     color: colors.textSecondary,
     fontSize: fontSize.caption,
     fontWeight: '800',
-    lineHeight: 17,
+    textAlign: 'center',
   },
-  progressPanel: {
+  sessionMetaWrap: {
+    paddingTop: spacing.xs,
+  },
+  statusBanner: {
+    alignItems: 'center',
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderRadius: radius.lg,
     borderWidth: 1,
-    gap: spacing.sm,
-    padding: spacing.md,
-  },
-  progressCopy: {
-    alignItems: 'center',
     flexDirection: 'row',
+    gap: spacing.md,
     justifyContent: 'space-between',
-  },
-  progressLabel: {
-    color: colors.textPrimary,
-    fontSize: fontSize.title,
-    fontWeight: '900',
-  },
-  progressValue: {
-    color: colors.accent,
-    fontFamily: fontFamily.display,
-    fontSize: 28,
-    letterSpacing: 0,
-  },
-  progressTrack: {
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.pill,
-    height: 12,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    backgroundColor: colors.accent,
-    borderRadius: radius.pill,
-    height: '100%',
-  },
-  progressMeta: {
-    color: colors.textSecondary,
-    fontSize: fontSize.caption,
-    fontWeight: '700',
-  },
-  activeList: {
-    gap: spacing.md,
-    paddingBottom: 256,
-  },
-  exerciseTracker: {
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    gap: spacing.md,
-    padding: spacing.md,
-  },
-  trackerHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.md,
-  },
-  trackerIcon: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.md,
-    height: 48,
-    justifyContent: 'center',
-    width: 48,
-  },
-  trackerCopy: {
-    flex: 1,
-    gap: spacing.xs,
-  },
-  trackerTitle: {
-    color: colors.textPrimary,
-    fontFamily: fontFamily.display,
-    fontSize: 25,
-    letterSpacing: 0,
-    lineHeight: 28,
-  },
-  trackerMeta: {
-    color: colors.textSecondary,
-    fontSize: fontSize.caption,
-    fontWeight: '700',
-    lineHeight: 17,
-  },
-  trackerActions: {
-    alignItems: 'flex-start',
-  },
-  tutorialButton: {
-    alignItems: 'center',
-    backgroundColor: colors.accent,
-    borderRadius: radius.pill,
-    flexDirection: 'row',
-    gap: spacing.xs,
-    minHeight: 36,
     paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
   },
-  tutorialButtonText: {
-    color: colors.background,
+  statusBannerButton: {
+    backgroundColor: colors.accentDark,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  statusBannerButtonText: {
+    color: colors.accent,
     fontSize: fontSize.caption,
     fontWeight: '900',
     textTransform: 'uppercase',
   },
-  setDropdown: {
-    gap: spacing.md,
-  },
-  setHeader: {
-    alignItems: 'center',
-    borderBottomColor: colors.border,
-    borderBottomWidth: 1,
-    flexDirection: 'row',
-    gap: spacing.sm,
-    paddingBottom: spacing.sm,
-  },
-  setHeaderText: {
+  statusBannerText: {
     color: colors.textSecondary,
-    fontSize: fontSize.caption,
-    fontWeight: '900',
-    textAlign: 'center',
-    width: '100%',
-  },
-  setDoneColumn: {
-    alignItems: 'center',
-    flexShrink: 0,
-    justifyContent: 'center',
-    width: 56,
-  },
-  setValueColumn: {
     flex: 1,
-    minWidth: 0,
+    fontSize: fontSize.caption,
+    fontWeight: '700',
+    lineHeight: 18,
   },
-  setRow: {
+  statusCard: {
     alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  checkboxButton: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
-    borderColor: colors.textMuted,
-    borderRadius: 6,
-    borderWidth: 2,
-    height: 30,
-    justifyContent: 'center',
-    width: 30,
-  },
-  checkboxButtonActive: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent,
-  },
-  setNumber: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.md,
-    height: 50,
-    justifyContent: 'center',
-    width: '100%',
-  },
-  setNumberText: {
-    color: colors.textPrimary,
-    fontSize: fontSize.title,
-    fontWeight: '900',
-  },
-  setInput: {
-    backgroundColor: colors.surfaceAlt,
-    borderColor: 'transparent',
-    borderRadius: radius.md,
-    borderWidth: 1,
-    color: colors.textPrimary,
-    fontSize: 20,
-    fontWeight: '900',
-    height: 50,
-    minWidth: 0,
-    paddingHorizontal: spacing.sm,
-    width: '100%',
-  },
-  setInputDone: {
-    borderColor: colors.accent,
-    color: colors.accentLight,
-  },
-  setActions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.md,
-  },
-  addSetButton: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.sm,
-    paddingVertical: spacing.xs,
-  },
-  addSetIcon: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.pill,
-    height: 40,
-    justifyContent: 'center',
-    width: 40,
-  },
-  addSetText: {
-    color: colors.accent,
-    fontSize: fontSize.title,
-    fontWeight: '900',
-  },
-  minusSetButton: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.sm,
-    paddingVertical: spacing.xs,
-  },
-  minusSetButtonDisabled: {
-    opacity: 0.35,
-  },
-  minusSetIcon: {
-    alignItems: 'center',
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.pill,
-    height: 40,
-    justifyContent: 'center',
-    width: 40,
-  },
-  minusSetText: {
-    color: colors.danger,
-    fontSize: fontSize.title,
-    fontWeight: '900',
-  },
-  stickyCompleteBar: {
-    bottom: STICKY_COMPLETE_BOTTOM,
-    elevation: 6,
-    left: spacing.lg,
-    position: 'absolute',
-    right: spacing.lg,
-    zIndex: 10,
-  },
-  finishButton: {
-    alignItems: 'center',
-    backgroundColor: colors.accent,
-    borderRadius: radius.pill,
-    justifyContent: 'center',
-    minHeight: 56,
-  },
-  finishButtonDisabled: {
-    backgroundColor: colors.accentDark,
-  },
-  finishButtonText: {
-    color: colors.background,
-    fontFamily: fontFamily.display,
-    fontSize: 24,
-    letterSpacing: 0,
-  },
-  tutorialTitle: {
-    color: colors.textPrimary,
-    fontFamily: fontFamily.display,
-    fontSize: 28,
-    letterSpacing: 0,
-    lineHeight: 31,
-  },
-  videoFrame: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderRadius: radius.lg,
     borderWidth: 1,
-    flex: 1,
-    minHeight: 320,
-    overflow: 'hidden',
+    gap: spacing.md,
+    marginTop: spacing.xxl,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.xxl,
   },
-  video: {
-    backgroundColor: colors.background,
-    flex: 1,
+  statusMessage: {
+    color: colors.textSecondary,
+    fontSize: fontSize.body,
+    lineHeight: 22,
+    textAlign: 'center',
+  },
+  statusTitle: {
+    color: colors.textPrimary,
+    fontFamily: fontFamily.display,
+    fontSize: 32,
+    lineHeight: 36,
+    textAlign: 'center',
   },
 });

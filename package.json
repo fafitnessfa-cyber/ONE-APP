@@ -21,12 +21,14 @@
     "sync:usda:branded:expanded:active-set": "node scripts/sync-usda-branded-expanded-active-set.mjs",
     "supabase:push:remote": "sh -c 'npx supabase db push --db-url \"$SUPABASE_DB_URL\" --include-seed'",
     "supabase:types": "sh -c 'npx supabase gen types typescript --db-url \"$SUPABASE_DB_URL\" --schema public > types/database.types.ts'",
+    "verify:exercises": "node scripts/verify-exercise-library.mjs",
+    "verify:profile": "node scripts/verify-profile-foundation.mjs",
+    "verify:workouts": "node scripts/verify-workouts.mjs",
     "verify:nutrition:catalog-logs": "node scripts/verify-nutrition-catalog-log-snapshots.mjs",
     "verify:nutrition:barcodes": "node scripts/verify-nutrition-barcodes.mjs",
     "verify:nutrition:branded-expansion": "node scripts/verify-nutrition-branded-expansion.mjs",
     "verify:nutrition:personalization": "node scripts/verify-nutrition-personalization.mjs",
-    "verify:nutrition:private-items": "node scripts/verify-nutrition-private-items.mjs",
-    "verify:exercises": "node scripts/verify-exercise-library.mjs"
+    "verify:nutrition:private-items": "node scripts/verify-nutrition-private-items.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/bebas-neue": "^0.4.1",
