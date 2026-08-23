@@ -1,6 +1,6 @@
 import React from 'react';
 import { Stack } from 'expo-router';
-import { ProtectedRouteGate } from '../../components/ProtectedRouteGate';
+import { ProtectedRouteGate } from '../../../components/ProtectedRouteGate';
 
 export default function ProgressLayout() {
   return (

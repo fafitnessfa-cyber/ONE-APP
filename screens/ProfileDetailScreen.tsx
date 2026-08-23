@@ -211,12 +211,24 @@ function createDetailContent({
         },
       ],
       actions: [
-        {
-          id: 'password-reset',
-          title: 'Change Password',
-          subtitle: 'Send a secure reset flow to the registered email.',
-          icon: 'lock-closed-outline',
-        },
+        ...(isAnonymous
+          ? [
+              {
+                id: 'upgrade-account',
+                title: 'Secure Guest Account',
+                subtitle:
+                  'Link this guest profile to an email login without losing any existing data.',
+                icon: 'shield-checkmark-outline' as const,
+              },
+            ]
+          : [
+              {
+                id: 'password-reset',
+                title: 'Change Password',
+                subtitle: 'Send a secure reset flow to the registered email.',
+                icon: 'lock-closed-outline' as const,
+              },
+            ]),
         {
           id: 'sign-out',
           title: 'Sign Out',
@@ -429,6 +441,9 @@ export function ProfileDetailScreen({ variant }: ProfileDetailScreenProps) {
         return;
       case 'edit-preferences':
         router.push('/profile/edit-preferences' as Href);
+        return;
+      case 'upgrade-account':
+        router.push('/profile/upgrade-account' as Href);
         return;
       case 'password-reset':
         if (!user?.email) {

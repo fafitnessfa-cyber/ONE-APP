@@ -9,6 +9,75 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
+      body_measurements: {
+        Row: {
+          created_at: string
+          id: string
+          measured_at: string
+          measurement_type: string
+          notes: string | null
+          unit: string
+          updated_at: string
+          user_id: string
+          value: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          measured_at?: string
+          measurement_type: string
+          notes?: string | null
+          unit: string
+          updated_at?: string
+          user_id: string
+          value: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          measured_at?: string
+          measurement_type?: string
+          notes?: string | null
+          unit?: string
+          updated_at?: string
+          user_id?: string
+          value?: number
+        }
+        Relationships: []
+      }
+      body_weight_entries: {
+        Row: {
+          created_at: string
+          id: string
+          measured_at: string
+          notes: string | null
+          source: string
+          updated_at: string
+          user_id: string
+          weight_kg: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          measured_at?: string
+          notes?: string | null
+          source?: string
+          updated_at?: string
+          user_id: string
+          weight_kg: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          measured_at?: string
+          notes?: string | null
+          source?: string
+          updated_at?: string
+          user_id?: string
+          weight_kg?: number
+        }
+        Relationships: []
+      }
       catalog_foods: {
         Row: {
           base_amount: number
@@ -1636,6 +1705,42 @@ export type Database = {
         Returns: string
       }
       food_source_priority: { Args: { source_code: string }; Returns: number }
+      get_activity_buckets: {
+        Args: { p_range?: string; p_reference_at?: string; p_timezone?: string }
+        Returns: {
+          bucket_end: string
+          bucket_start: string
+          completed_working_sets: number
+          external_volume_kg: number
+          label: string
+          total_minutes: number
+          workout_count: number
+        }[]
+      }
+      get_exercise_progress: {
+        Args: { p_exercise_id: string; p_limit?: number }
+        Returns: {
+          achieved_at: string
+          assistance_weight_kg: number
+          bodyweight_kg_snapshot: number
+          counts_as_working_set: boolean
+          distance_meters: number
+          duration_seconds: number
+          exercise_id: string
+          exercise_name: string
+          external_volume_kg: number
+          load_type: string
+          reps: number
+          session_name: string
+          set_number: number
+          set_type: string
+          tracking_metric: string
+          weight_kg: number
+          workout_session_exercise_id: string
+          workout_session_id: string
+          workout_set_id: string
+        }[]
+      }
       get_food_go_tos: {
         Args: {
           meal_context: Database["public"]["Enums"]["meal_type"]
@@ -1668,6 +1773,33 @@ export type Database = {
           user_food_serving_id: string
         }[]
       }
+      get_latest_body_weight_kg: {
+        Args: { p_user_id: string }
+        Returns: number
+      }
+      get_personal_records: {
+        Args: { p_exercise_id?: string; p_limit?: number }
+        Returns: {
+          achieved_at: string
+          assistance_weight_kg: number
+          bodyweight_kg_snapshot: number
+          distance_meters: number
+          duration_seconds: number
+          exercise_id: string
+          exercise_name: string
+          load_type: string
+          previous_achieved_at: string
+          previous_value: number
+          record_type: string
+          reps: number
+          tracking_metric: string
+          unit: string
+          value: number
+          weight_kg: number
+          workout_session_id: string
+          workout_set_id: string
+        }[]
+      }
       get_recent_foods: {
         Args: { result_limit?: number }
         Returns: {
@@ -1693,6 +1825,22 @@ export type Database = {
           sodium_mg_per_serving: number
           user_food_id: string
           user_food_serving_id: string
+        }[]
+      }
+      get_training_summary: {
+        Args: { p_reference_at?: string; p_timezone?: string }
+        Returns: {
+          completed_working_sets_this_week: number
+          completed_workouts_last_30_days: number
+          completed_workouts_last_7_days: number
+          completed_workouts_this_week: number
+          external_volume_kg_this_week: number
+          primary_muscle_sets: Json
+          secondary_muscle_sets: Json
+          top_exercises: Json
+          total_duration_seconds_this_week: number
+          weekly_goal_completion_percent: number
+          workout_goal_per_week: number
         }[]
       }
       import_open_food_facts_product: {
@@ -1767,6 +1915,33 @@ export type Database = {
           household_unit: string
           milliliter_volume: number
           quantity: number
+        }[]
+      }
+      progress_completed_set_facts: {
+        Args: { p_exercise_id?: string }
+        Returns: {
+          achieved_at: string
+          assistance_weight_kg: number
+          bodyweight_kg_snapshot: number
+          counts_as_working_set: boolean
+          distance_meters: number
+          duration_seconds: number
+          effective_load_kg: number
+          estimated_one_rep_max_kg: number
+          exercise_id: string
+          exercise_name: string
+          external_volume_kg: number
+          load_type: string
+          reps: number
+          session_completed_at: string
+          session_name: string
+          set_number: number
+          set_type: string
+          tracking_metric: string
+          weight_kg: number
+          workout_session_exercise_id: string
+          workout_session_id: string
+          workout_set_id: string
         }[]
       }
       resolve_catalog_food_barcode: {
@@ -1923,6 +2098,10 @@ export type Database = {
           session_id: string
           was_resumed: boolean
         }[]
+      }
+      sync_profile_current_weight_from_history: {
+        Args: { p_user_id: string }
+        Returns: undefined
       }
     }
     Enums: {

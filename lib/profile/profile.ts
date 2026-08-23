@@ -187,17 +187,21 @@ export async function ensureCurrentProfile(user: User) {
 
 export async function saveCurrentProfile(userId: string, input: ProfileSaveInput) {
   const client = assertSupabase();
-  const { data, error } = await client
+  const { error } = await client
     .from('profiles')
-    .upsert(buildProfilePayload(userId, input), { onConflict: 'id' })
-    .select('*')
-    .single();
+    .upsert(buildProfilePayload(userId, input), { onConflict: 'id' });
 
   if (error) {
     throw error;
   }
 
-  return mapProfileRow(data);
+  const profile = await getCurrentProfile(userId);
+
+  if (!profile) {
+    throw new Error('Profile save succeeded but the profile could not be reloaded.');
+  }
+
+  return profile;
 }
 
 export async function refreshProfileForSession(session: Session | null) {
