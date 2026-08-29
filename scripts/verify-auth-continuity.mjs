@@ -89,14 +89,6 @@ async function createAnonymousUser(label) {
   };
 }
 
-async function cleanupUsers(pgClient, userIds) {
-  if (userIds.length === 0) {
-    return;
-  }
-
-  await pgClient.query('delete from auth.users where id = any($1::uuid[])', [userIds]);
-}
-
 async function createMailbox() {
   const domains = await fetch('https://api.mail.tm/domains').then((response) =>
     response.json(),
@@ -580,29 +572,247 @@ async function loadOwnershipSnapshot(pgClient, userId) {
   return snapshot;
 }
 
-async function verifyRlsIsolation(userBClient, userAId) {
-  const checks = [
-    ['profiles', userBClient.from('profiles').select('id').eq('id', userAId)],
-    ['food_logs', userBClient.from('food_logs').select('id').eq('user_id', userAId)],
-    ['user_foods', userBClient.from('user_foods').select('id').eq('user_id', userAId)],
-    ['workout_plans', userBClient.from('workout_plans').select('id').eq('user_id', userAId)],
-    ['workout_sessions', userBClient.from('workout_sessions').select('id').eq('user_id', userAId)],
-    ['body_weight_entries', userBClient.from('body_weight_entries').select('id').eq('user_id', userAId)],
-    ['body_measurements', userBClient.from('body_measurements').select('id').eq('user_id', userAId)],
-  ];
+function sortIds(rows) {
+  return rows.map((row) => row.id).sort();
+}
 
-  for (const [label, request] of checks) {
-    const { data, error } = await request;
+function assertSameIds(beforeRows, afterRows, label) {
+  const beforeIds = sortIds(beforeRows);
+  const afterIds = sortIds(afterRows);
 
-    if (error) {
-      throw new Error(`User B ${label} isolation check failed: ${error.message}`);
+  assertCondition(
+    beforeIds.length === afterIds.length,
+    `${label} row count changed unexpectedly during upgrade.`,
+  );
+  assertCondition(
+    beforeIds.every((id, index) => id === afterIds[index]),
+    `${label} row ids changed unexpectedly during upgrade.`,
+  );
+}
+
+function assertSnapshotOwnedByUser(snapshot, userId, label) {
+  assertCondition(
+    snapshot.profile.length === 1 && snapshot.profile[0].id === userId,
+    `${label}: profile ownership did not remain attached to the original UUID.`,
+  );
+
+  for (const [key, rows] of Object.entries(snapshot)) {
+    if (key === 'profile') {
+      continue;
     }
 
-    assertCondition(
-      (data?.length ?? 0) === 0,
-      `User B should not be able to read User A ${label}.`,
+    for (const row of rows) {
+      assertCondition(
+        row.user_id === userId,
+        `${label}: ${key} row ${row.id} is no longer owned by the original UUID.`,
+      );
+    }
+  }
+}
+
+function assertSnapshotMatches(referenceSnapshot, candidateSnapshot, label) {
+  for (const key of Object.keys(referenceSnapshot)) {
+    assertSameIds(
+      referenceSnapshot[key],
+      candidateSnapshot[key],
+      `${label} ${key}`,
     );
   }
+}
+
+function buildSnapshotReport(snapshot) {
+  const profileRow = snapshot.profile[0] ?? null;
+
+  return {
+    profile: {
+      count: snapshot.profile.length,
+      ids: sortIds(snapshot.profile),
+      onboarding_completed: profileRow?.onboarding_completed ?? false,
+      display_name: profileRow?.display_name ?? null,
+      fitness_goal: profileRow?.fitness_goal ?? null,
+      current_weight_kg:
+        profileRow?.current_weight_kg == null
+          ? null
+          : Number(profileRow.current_weight_kg),
+    },
+    nutrition: {
+      food_logs: {
+        count: snapshot.nutritionLog.length,
+        ids: sortIds(snapshot.nutritionLog),
+      },
+      custom_foods: {
+        count: snapshot.customFood.length,
+        ids: sortIds(snapshot.customFood),
+      },
+    },
+    workout: {
+      plans: {
+        count: snapshot.workoutPlan.length,
+        ids: sortIds(snapshot.workoutPlan),
+      },
+      sessions: {
+        count: snapshot.workoutSession.length,
+        ids: sortIds(snapshot.workoutSession),
+      },
+      sets: {
+        count: snapshot.workoutSet.length,
+        ids: sortIds(snapshot.workoutSet),
+      },
+    },
+    progress: {
+      body_weights: {
+        count: snapshot.bodyWeight.length,
+        ids: sortIds(snapshot.bodyWeight),
+      },
+      measurements: {
+        count: snapshot.bodyMeasurement.length,
+        ids: sortIds(snapshot.bodyMeasurement),
+      },
+    },
+  };
+}
+
+async function assertBlockedRead(label, request) {
+  const { data, error } = await request;
+
+  if (error) {
+    throw new Error(`User B ${label} read isolation check failed: ${error.message}`);
+  }
+
+  assertCondition(
+    (data?.length ?? 0) === 0,
+    `User B should not be able to read User A ${label}.`,
+  );
+}
+
+async function assertBlockedMutation(label, request) {
+  const { data, error } = await request;
+
+  if (error) {
+    return;
+  }
+
+  assertCondition(
+    (data?.length ?? 0) === 0,
+    `User B should not be able to mutate User A ${label}.`,
+  );
+}
+
+async function verifyRlsIsolation(userBClient, userAId, snapshot) {
+  await Promise.all([
+    assertBlockedRead('profile', userBClient.from('profiles').select('id').eq('id', userAId)),
+    assertBlockedRead(
+      'nutrition logs',
+      userBClient.from('food_logs').select('id').eq('user_id', userAId),
+    ),
+    assertBlockedRead(
+      'custom foods',
+      userBClient.from('user_foods').select('id').eq('user_id', userAId),
+    ),
+    assertBlockedRead(
+      'workout plans',
+      userBClient.from('workout_plans').select('id').eq('user_id', userAId),
+    ),
+    assertBlockedRead(
+      'workout sessions',
+      userBClient.from('workout_sessions').select('id').eq('user_id', userAId),
+    ),
+    assertBlockedRead(
+      'workout sets',
+      userBClient.from('workout_sets').select('id').eq('user_id', userAId),
+    ),
+    assertBlockedRead(
+      'body weight entries',
+      userBClient.from('body_weight_entries').select('id').eq('user_id', userAId),
+    ),
+    assertBlockedRead(
+      'body measurements',
+      userBClient.from('body_measurements').select('id').eq('user_id', userAId),
+    ),
+  ]);
+
+  const [profileRow] = snapshot.profile;
+  const [nutritionLogRow] = snapshot.nutritionLog;
+  const [customFoodRow] = snapshot.customFood;
+  const [workoutPlanRow] = snapshot.workoutPlan;
+  const [workoutSessionRow] = snapshot.workoutSession;
+  const [workoutSetRow] = snapshot.workoutSet;
+  const [bodyWeightRow] = snapshot.bodyWeight;
+  const [bodyMeasurementRow] = snapshot.bodyMeasurement;
+
+  await Promise.all([
+    assertBlockedMutation(
+      'profile',
+      userBClient
+        .from('profiles')
+        .update({ display_name: profileRow.display_name })
+        .eq('id', userAId)
+        .select('id'),
+    ),
+    assertBlockedMutation(
+      'nutrition logs',
+      userBClient
+        .from('food_logs')
+        .update({ food_name: nutritionLogRow.food_name })
+        .eq('id', nutritionLogRow.id)
+        .select('id'),
+    ),
+    assertBlockedMutation(
+      'custom foods',
+      userBClient
+        .from('user_foods')
+        .update({ name: customFoodRow.name })
+        .eq('id', customFoodRow.id)
+        .select('id'),
+    ),
+    assertBlockedMutation(
+      'workout plans',
+      userBClient
+        .from('workout_plans')
+        .update({ name: workoutPlanRow.name })
+        .eq('id', workoutPlanRow.id)
+        .select('id'),
+    ),
+    assertBlockedMutation(
+      'workout sessions',
+      userBClient
+        .from('workout_sessions')
+        .update({ status: workoutSessionRow.status })
+        .eq('id', workoutSessionRow.id)
+        .select('id'),
+    ),
+    assertBlockedMutation(
+      'workout sets',
+      userBClient
+        .from('workout_sets')
+        .update({ reps: workoutSetRow.reps })
+        .eq('id', workoutSetRow.id)
+        .select('id'),
+    ),
+    assertBlockedMutation(
+      'body weight entries',
+      userBClient
+        .from('body_weight_entries')
+        .update({ weight_kg: bodyWeightRow.weight_kg })
+        .eq('id', bodyWeightRow.id)
+        .select('id'),
+    ),
+    assertBlockedMutation(
+      'body measurements',
+      userBClient
+        .from('body_measurements')
+        .update({ value: bodyMeasurementRow.value })
+        .eq('id', bodyMeasurementRow.id)
+        .select('id'),
+    ),
+  ]);
+
+  return {
+    profile: 'PASS',
+    nutrition: 'PASS',
+    workout: 'PASS',
+    progress: 'PASS',
+  };
 }
 
 async function verifyContinuityReads(client, originalUserId) {
@@ -692,22 +902,32 @@ async function verifyContinuityReads(client, originalUserId) {
     Number(trainingSummary?.completed_workouts_this_week ?? 0) >= 1,
     'Progress analytics did not retain the completed workout after upgrade.',
   );
+
+  return {
+    profile: 'PASS',
+    nutrition: 'PASS',
+    workout: 'PASS',
+    progress: 'PASS',
+  };
 }
 
 async function main() {
   assertEnv();
 
   const pgClient = await createPgClient();
-  const createdUserIds = [];
-  const createdMailbox = await createMailbox();
-  const permanentPassword = createEphemeralPassword('auth');
+  let currentStage = 'initialize verifier';
 
   try {
+    currentStage = 'create temporary mailbox';
+    const createdMailbox = await createMailbox();
+    const permanentPassword = createEphemeralPassword('auth');
+
+    currentStage = 'create temporary verifier users';
     console.log('Creating temporary verifier users...');
     const userA = await createAnonymousUser('user-a');
     const userB = await createAnonymousUser('user-b');
-    createdUserIds.push(userA.userId, userB.userId);
 
+    currentStage = 'seed profile, nutrition, workout, and progress data';
     console.log('Preparing profile, nutrition, workout, and progress data for User A...');
     await setProfile(userA.client, userA.userId, PROFILE_FIXTURE, 'user-a');
 
@@ -731,6 +951,7 @@ async function main() {
     const progressEntries = await createProgressEntries(userA.client, userA.userId);
 
     const ownershipBefore = await loadOwnershipSnapshot(pgClient, userA.userId);
+    assertSnapshotOwnedByUser(ownershipBefore, userA.userId, 'pre-upgrade snapshot');
     assertCondition(ownershipBefore.profile.length === 1, 'Profile row should exist before upgrade.');
     assertCondition(
       ownershipBefore.nutritionLog.some((row) => row.id === catalogLog.id),
@@ -762,7 +983,9 @@ async function main() {
       ),
       'Body measurement should be owned by the original user before upgrade.',
     );
+    const preUpgradeSnapshot = buildSnapshotReport(ownershipBefore);
 
+    currentStage = 'link guest account to permanent email identity';
     console.log('Linking the guest account to a permanent email identity...');
     const upgradeEmailResponse = await userA.client.auth.updateUser({
       email: createdMailbox.address,
@@ -779,6 +1002,7 @@ async function main() {
       'Linking the email identity changed the auth user id unexpectedly.',
     );
 
+    currentStage = 'verify email change';
     const tokenHash = await waitForEmailChangeTokenHash(createdMailbox.token);
     const verifyResponse = await userA.client.auth.verifyOtp({
       token_hash: tokenHash,
@@ -798,6 +1022,7 @@ async function main() {
       'User should no longer be anonymous after email confirmation.',
     );
 
+    currentStage = 'set permanent password';
     const passwordResponse = await userA.client.auth.updateUser({
       password: permanentPassword,
     });
@@ -810,10 +1035,32 @@ async function main() {
       passwordResponse.data.user?.id === userA.userId,
       'Setting the password changed the auth user id unexpectedly.',
     );
+    const upgradedUserId = passwordResponse.data.user.id;
 
+    currentStage = 'verify continuity after upgrade before sign-out';
+    console.log('Confirming cross-system continuity before sign-out...');
+    const postUpgradeContinuity = await verifyContinuityReads(userA.client, userA.userId);
+    const ownershipAfterUpgrade = await loadOwnershipSnapshot(pgClient, userA.userId);
+    assertSnapshotOwnedByUser(
+      ownershipAfterUpgrade,
+      userA.userId,
+      'post-upgrade snapshot',
+    );
+    assertSnapshotMatches(
+      ownershipBefore,
+      ownershipAfterUpgrade,
+      'post-upgrade ownership',
+    );
+
+    currentStage = 'verify RLS isolation';
     console.log('Verifying RLS still isolates the upgraded user...');
-    await verifyRlsIsolation(userB.client, userA.userId);
+    const rlsContinuity = await verifyRlsIsolation(
+      userB.client,
+      userA.userId,
+      ownershipBefore,
+    );
 
+    currentStage = 'sign out after upgrade';
     console.log('Signing out and signing back in with the permanent credentials...');
     const signOutResponse = await userA.client.auth.signOut();
 
@@ -821,6 +1068,7 @@ async function main() {
       throw new Error(`Sign-out after upgrade failed: ${signOutResponse.error.message}`);
     }
 
+    currentStage = 'sign back in with permanent credentials';
     const signInResponse = await userA.client.auth.signInWithPassword({
       email: createdMailbox.address,
       password: permanentPassword,
@@ -838,39 +1086,69 @@ async function main() {
       signInResponse.data.user?.is_anonymous === false,
       'Permanent sign-in should not return an anonymous user.',
     );
+    const reloginUserId = signInResponse.data.user.id;
 
+    currentStage = 'verify continuity after re-login';
     console.log('Confirming cross-system continuity after re-login...');
-    await verifyContinuityReads(userA.client, userA.userId);
+    const postReloginContinuity = await verifyContinuityReads(
+      userA.client,
+      userA.userId,
+    );
+    const ownershipAfterRelogin = await loadOwnershipSnapshot(pgClient, userA.userId);
+    assertSnapshotOwnedByUser(
+      ownershipAfterRelogin,
+      userA.userId,
+      'post-relogin snapshot',
+    );
+    assertSnapshotMatches(
+      ownershipBefore,
+      ownershipAfterRelogin,
+      'post-relogin ownership',
+    );
 
     console.log(
       JSON.stringify(
         {
-          same_uuid_after_link: true,
-          same_uuid_after_verification: true,
-          same_uuid_after_password: true,
-          same_uuid_after_relogin: true,
-          original_user_id: userA.userId,
-          registered_user_id: signInResponse.data.user.id,
-          continuity: {
-            profile: 'PASS',
-            nutrition_catalog_log: 'PASS',
-            nutrition_custom_food: 'PASS',
-            workout_plan: 'PASS',
-            workout_session: 'PASS',
-            progress_body_weight: 'PASS',
-            progress_measurement: 'PASS',
-            progress_analytics: 'PASS',
+          smtp: {
+            mode: 'CUSTOM_SMTP_INFERRED_FROM_SUCCESSFUL_NON_TEAM_DELIVERY',
+            verification_email_worked: true,
+            rate_limit_error: null,
           },
-          rls: 'PASS',
+          uuids: {
+            anonymous_user_id: userA.userId,
+            upgraded_user_id: upgradedUserId,
+            relogin_user_id: reloginUserId,
+            anonymous_equals_upgraded: userA.userId === upgradedUserId,
+            upgraded_equals_relogin: upgradedUserId === reloginUserId,
+          },
+          pre_upgrade: preUpgradeSnapshot,
+          post_upgrade_continuity: postUpgradeContinuity,
+          post_relogin_continuity: postReloginContinuity,
+          ownership_integrity: {
+            original_user_id: userA.userId,
+            all_rows_owned_by_original_uuid: true,
+            duplicate_rows_created: {
+              profile: 0,
+              nutrition_logs: 0,
+              custom_foods: 0,
+              workout_plans: 0,
+              workout_sessions: 0,
+              workout_sets: 0,
+              body_weights: 0,
+              body_measurements: 0,
+            },
+          },
+          rls: rlsContinuity,
+          cleanup: 'SKIPPED_NO_DIRECT_AUTH_TABLE_MUTATION',
         },
         null,
         2,
       ),
     );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${currentStage}: ${message}`);
   } finally {
-    await cleanupUsers(pgClient, createdUserIds).catch((error) => {
-      console.error('Cleanup warning:', error.message);
-    });
     await pgClient.end();
   }
 }
