@@ -1,7 +1,7 @@
 import React from 'react';
 import { ScrollView, TouchableOpacity, Text, StyleSheet } from 'react-native';
 import { colors, spacing, radius, fontSize } from '../theme';
-import { FilterTag } from '../types';
+import type { FilterTag } from '../lib/exercises/types';
 
 interface FilterChipsProps {
   tags: FilterTag[];

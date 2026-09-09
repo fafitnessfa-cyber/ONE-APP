@@ -1,61 +1,241 @@
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Href, useRouter } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
+import { Href, useFocusEffect, useRouter } from 'expo-router';
 import Svg, { Circle, Line } from 'react-native-svg';
 import { AppScreen } from '../components/AppScreen';
+import { useAuthProfile } from '../lib/profile/context';
+import {
+  calculateGoalCompletionForRange,
+  getActivityBuckets,
+  getTrainingSummary,
+} from '../lib/progress/analytics';
+import {
+  getBodyMeasurements,
+  getBodyWeightHistory,
+  summarizeBodyWeightTrend,
+} from '../lib/progress/measurements';
+import { getPersonalRecords } from '../lib/progress/records';
+import {
+  formatDurationMinutes,
+  formatRecordTypeLabel,
+  formatRecordValue,
+  getFriendlyProgressError,
+} from '../lib/progress/shared';
+import type {
+  PersonalRecord,
+  ProgressActivityBucket,
+  ProgressActivityRange,
+  ProgressDashboardSnapshot,
+} from '../lib/progress/types';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
 
-type ActivityRange = 'week' | 'month';
 type BodyFocus = 'primary' | 'secondary';
-
-const activityData = {
-  week: [
-    { label: 'Mon', minutes: 52, workouts: 1 },
-    { label: 'Tue', minutes: 74, workouts: 1 },
-    { label: 'Wed', minutes: 58, workouts: 1 },
-    { label: 'Thu', minutes: 84, workouts: 1 },
-    { label: 'Fri', minutes: 66, workouts: 1 },
-    { label: 'Sat', minutes: 36, workouts: 0 },
-    { label: 'Sun', minutes: 8, workouts: 0 },
-  ],
-  month: [
-    { label: 'W1', minutes: 260, workouts: 4 },
-    { label: 'W2', minutes: 315, workouts: 5 },
-    { label: 'W3', minutes: 280, workouts: 4 },
-    { label: 'W4', minutes: 340, workouts: 5 },
-  ],
-};
 
 const CHART_HEIGHT = 96;
 
-const achievements = [
-  { icon: 'shield-checkmark', title: '10 Workouts', detail: 'Keep showing up' },
-  { icon: 'star', title: 'New PR', detail: 'Personal best' },
-  { icon: 'layers', title: 'Level Up', detail: 'Reach lvl 24' },
-  { icon: 'flame', title: '9 Day Streak', detail: 'Best: 14 days' },
-];
+const FALLBACK_ACTIVITY_DATA: Record<ProgressActivityRange, ProgressActivityBucket[]> = {
+  week: [
+    { label: 'Mon', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'Tue', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'Wed', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'Thu', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'Fri', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'Sat', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'Sun', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+  ],
+  month: [
+    { label: 'W1', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'W2', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'W3', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+    { label: 'W4', bucketStart: '', bucketEnd: '', totalMinutes: 0, workoutCount: 0, completedWorkingSets: 0, externalVolumeKg: 0 },
+  ],
+};
+
+function getChartMaxValue(data: ProgressActivityBucket[], range: ProgressActivityRange) {
+  const maxMinutes = data.reduce(
+    (currentMax, item) => Math.max(currentMax, item.totalMinutes),
+    0,
+  );
+
+  if (maxMinutes <= 0) {
+    return range === 'week' ? 90 : 360;
+  }
+
+  const step = range === 'week' ? 30 : 60;
+  return Math.max(step, Math.ceil(maxMinutes / step) * step);
+}
+
+function formatSignedDelta(value: number | null, unitLabel: string) {
+  if (value == null) {
+    return 'Log your first check-in';
+  }
+
+  const prefix = value > 0 ? '+' : '';
+  return `${prefix}${value.toFixed(1)}${unitLabel} vs last check`;
+}
+
+function getWorkoutLabel(count: number) {
+  return `${count} workout${count === 1 ? '' : 's'}`;
+}
+
+function getMuscleSummaryLabel(items: Array<{ name: string; setCount?: number; setScore?: number }>) {
+  if (items.length === 0) {
+    return 'Log workouts to surface trends';
+  }
+
+  return items
+    .slice(0, 2)
+    .map((item) =>
+      item.setCount != null
+        ? `${item.name} ${item.setCount}`
+        : `${item.name} ${item.setScore?.toFixed(1) ?? '0'}`,
+    )
+    .join(' · ');
+}
+
+function getRecordIcon(recordType: PersonalRecord['recordType']) {
+  switch (recordType) {
+    case 'heaviest_load':
+      return 'barbell-outline';
+    case 'estimated_one_rep_max':
+      return 'speedometer-outline';
+    case 'max_reps':
+      return 'repeat-outline';
+    case 'least_assistance':
+      return 'trending-down-outline';
+    case 'longest_duration':
+      return 'timer-outline';
+    case 'longest_distance':
+      return 'walk-outline';
+    default:
+      return 'trophy-outline';
+  }
+}
 
 export function ProgressScreen() {
   const router = useRouter();
-  const [range, setRange] = React.useState<ActivityRange>('week');
-  const [selectedIndex, setSelectedIndex] = React.useState(3);
+  const isFocused = useIsFocused();
+  const { profile } = useAuthProfile();
+  const [range, setRange] = React.useState<ProgressActivityRange>('week');
+  const [selectedIndex, setSelectedIndex] = React.useState(6);
   const [bodyFocus, setBodyFocus] = React.useState<BodyFocus>('primary');
-  const [showAllAchievements, setShowAllAchievements] = React.useState(false);
+  const [dashboard, setDashboard] = React.useState<ProgressDashboardSnapshot | null>(
+    null,
+  );
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
-  const currentData = activityData[range];
-  const selectedActivity = currentData[Math.min(selectedIndex, currentData.length - 1)];
-  const totalMinutes = currentData.reduce((sum, item) => sum + item.minutes, 0);
-  const workoutCount = currentData.reduce((sum, item) => sum + item.workouts, 0);
-  const goalMet = range === 'week' ? 92 : 88;
-  const visibleAchievements = achievements.slice(0, 3);
-  const achievementRows = [achievements.slice(0, 2), achievements.slice(2, 4)];
+  const loadDashboard = React.useCallback(() => {
+    let isActive = true;
+
+    setIsLoading(true);
+
+    void Promise.all([
+      getActivityBuckets('week'),
+      getActivityBuckets('month'),
+      getTrainingSummary(),
+      getBodyWeightHistory(12),
+      getBodyMeasurements({ limit: 18 }),
+      getPersonalRecords({ limit: 8 }),
+    ])
+      .then(([weekActivity, monthActivity, summary, weightHistory, measurements, records]) => {
+        if (!isActive) {
+          return;
+        }
+
+        React.startTransition(() => {
+          setDashboard({
+            activity: {
+              week: weekActivity,
+              month: monthActivity,
+            },
+            summary,
+            weightHistory,
+            measurements,
+            records,
+          });
+          setErrorMessage(null);
+          setIsLoading(false);
+        });
+      })
+      .catch((error) => {
+        if (!isActive) {
+          return;
+        }
+
+        setErrorMessage(getFriendlyProgressError(error));
+        setIsLoading(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useFocusEffect(loadDashboard);
+
+  React.useEffect(() => {
+    setSelectedIndex(range === 'week' ? 6 : 3);
+  }, [range]);
+
+  const currentData = dashboard?.activity[range] ?? FALLBACK_ACTIVITY_DATA[range];
+  const selectedActivity =
+    currentData[Math.min(selectedIndex, currentData.length - 1)] ?? currentData[0];
+  const totalMinutes = currentData.reduce((sum, item) => sum + item.totalMinutes, 0);
+  const workoutCount = currentData.reduce((sum, item) => sum + item.workoutCount, 0);
+  const goalMet = calculateGoalCompletionForRange({
+    buckets: currentData,
+    range,
+    workoutGoalPerWeek: dashboard?.summary.workoutGoalPerWeek ?? null,
+    weeklyGoalCompletionPercent:
+      dashboard?.summary.weeklyGoalCompletionPercent ?? null,
+  });
+  const visibleRecords = dashboard?.records.slice(0, 3) ?? [];
+  const weightTrend = summarizeBodyWeightTrend(
+    dashboard?.weightHistory ?? [],
+    profile?.preferredUnits ?? null,
+  );
+  const primaryMuscleLabel = getMuscleSummaryLabel(
+    dashboard?.summary.primaryMuscleSets ?? [],
+  );
+  const secondaryMuscleLabel = getMuscleSummaryLabel(
+    dashboard?.summary.secondaryMuscleSets ?? [],
+  );
+  const chartMaxValue = getChartMaxValue(currentData, range);
+  const yAxisLabels = [
+    `${chartMaxValue}m`,
+    `${Math.round((chartMaxValue * 2) / 3)}m`,
+    `${Math.round(chartMaxValue / 3)}m`,
+    '0m',
+  ];
 
   const toggleRange = () => {
-    const nextRange = range === 'week' ? 'month' : 'week';
-    setRange(nextRange);
-    setSelectedIndex(nextRange === 'week' ? 3 : 1);
+    setRange((currentRange) => (currentRange === 'week' ? 'month' : 'week'));
   };
+
+  function runWhenFocused(action: () => void) {
+    if (!isFocused) {
+      return;
+    }
+
+    action();
+  }
+
+  const goalMetLabel = goalMet == null ? '--' : `${Math.round(goalMet)}%`;
+  const weightValue =
+    weightTrend.latestDisplayValue == null
+      ? '--'
+      : weightTrend.latestDisplayValue.toFixed(1);
+  const weightUnit = weightTrend.latestDisplayValue == null ? '' : weightTrend.unitLabel;
 
   return (
     <AppScreen>
@@ -69,42 +249,60 @@ export function ProgressScreen() {
             <Text style={styles.subtitle}>Track how far you've come.</Text>
           </View>
           <View style={styles.levelPill}>
-            <Text style={styles.levelText}>LEVEL 24</Text>
+            <Text style={styles.levelText}>LEVEL --</Text>
           </View>
         </View>
 
         <View style={styles.heroCard}>
           <View style={styles.heroScoreBlock}>
-            <Text style={styles.heroValue}>86</Text>
-            <Text style={styles.heroLabel}>CONSISTENCY SCORE</Text>
-            <Text style={styles.heroTrend}>Up +12 this month</Text>
+            <Text style={styles.heroValue}>--</Text>
+            <Text style={styles.heroLabel}>FITNESS SCORE</Text>
+            <Text style={styles.heroTrend}>Formula arrives in a later gamification stage</Text>
             <View style={styles.heroDivider} />
             <View style={styles.heroNoteRow}>
               <Ionicons name="radio-button-on" size={14} color={colors.accent} />
-              <Text style={styles.heroNote}>Keep it up! Building momentum.</Text>
+              <Text style={styles.heroNote}>
+                Workouts, body metrics, and personal records are live below.
+              </Text>
             </View>
           </View>
-          <ProgressRing score={86} />
+          <ProgressRing score={0} />
         </View>
+
+        {errorMessage ? (
+          <View style={styles.statusCard}>
+            <Ionicons name="alert-circle-outline" size={16} color={colors.warning} />
+            <Text style={styles.statusText}>{errorMessage}</Text>
+          </View>
+        ) : null}
 
         <View style={styles.activityCard}>
           <View style={styles.sectionHeader}>
             <Pressable
               style={styles.sectionTitleRow}
-              onPress={() => router.push('/progress/activity' as Href)}
+              onPress={() =>
+                runWhenFocused(() => router.push('/progress/activity' as Href))
+              }
               accessibilityRole="button"
             >
               <Ionicons name="bar-chart" size={18} color={colors.accent} />
               <Text style={styles.sectionTitle}>Weekly Activity</Text>
             </Pressable>
             <View style={styles.sectionHeaderActions}>
-              <Pressable style={styles.rangePill} onPress={toggleRange}>
-                <Text style={styles.rangeText}>{range === 'week' ? 'This Week' : 'This Month'}</Text>
+              <Pressable
+                style={styles.rangePill}
+                onPress={() => runWhenFocused(toggleRange)}
+              >
+                <Text style={styles.rangeText}>
+                  {range === 'week' ? 'This Week' : 'This Month'}
+                </Text>
                 <Ionicons name="chevron-down" size={12} color={colors.accent} />
               </Pressable>
               <Pressable
                 style={styles.detailIconButton}
-                onPress={() => router.push('/progress/activity' as Href)}
+                onPress={() =>
+                  runWhenFocused(() => router.push('/progress/activity' as Href))
+                }
                 accessibilityRole="button"
                 accessibilityLabel="Open weekly activity details"
               >
@@ -115,10 +313,10 @@ export function ProgressScreen() {
 
           <View style={styles.chartArea}>
             <View style={styles.yAxis}>
-              <Text style={[styles.axisLabel, { top: -7 }]}>90m</Text>
-              <Text style={[styles.axisLabel, { top: 25 }]}>60m</Text>
-              <Text style={[styles.axisLabel, { top: 57 }]}>30m</Text>
-              <Text style={[styles.axisLabel, { top: 89 }]}>0m</Text>
+              <Text style={[styles.axisLabel, { top: -7 }]}>{yAxisLabels[0]}</Text>
+              <Text style={[styles.axisLabel, { top: 25 }]}>{yAxisLabels[1]}</Text>
+              <Text style={[styles.axisLabel, { top: 57 }]}>{yAxisLabels[2]}</Text>
+              <Text style={[styles.axisLabel, { top: 89 }]}>{yAxisLabels[3]}</Text>
             </View>
 
             <View style={styles.plotArea}>
@@ -129,15 +327,23 @@ export function ProgressScreen() {
 
               <View style={styles.barRow}>
                 {currentData.map((item, index) => {
-                  const maxValue = range === 'week' ? 90 : 360;
-                  const isSelected = index === Math.min(selectedIndex, currentData.length - 1);
-                  const height = Math.max(8, Math.round((item.minutes / maxValue) * CHART_HEIGHT));
+                  const isSelected =
+                    index === Math.min(selectedIndex, currentData.length - 1);
+                  const height =
+                    item.totalMinutes <= 0
+                      ? 8
+                      : Math.max(
+                          8,
+                          Math.round((item.totalMinutes / chartMaxValue) * CHART_HEIGHT),
+                        );
 
                   return (
                     <Pressable
-                      key={item.label}
+                      key={`${item.label}-${item.bucketStart}-${index}`}
                       style={styles.barColumn}
-                      onPress={() => setSelectedIndex(index)}
+                      onPress={() =>
+                        runWhenFocused(() => setSelectedIndex(index))
+                      }
                       accessibilityRole="button"
                       accessibilityLabel={`Show ${item.label} activity`}
                     >
@@ -162,42 +368,56 @@ export function ProgressScreen() {
 
           <View style={styles.selectedActivityRow}>
             <Text style={styles.selectedActivityText}>
-              {selectedActivity.label}: {selectedActivity.minutes}m active
+              {selectedActivity?.label ?? '--'}: {selectedActivity?.totalMinutes ?? 0}m active
             </Text>
-            <Text style={styles.selectedActivityText}>{selectedActivity.workouts} workout</Text>
+            <Text style={styles.selectedActivityText}>
+              {getWorkoutLabel(selectedActivity?.workoutCount ?? 0)}
+            </Text>
           </View>
 
           <View style={styles.activityStatsRow}>
             <MiniStat icon="barbell" value={String(workoutCount)} label="Workouts" />
-            <MiniStat icon="time" value={`${Math.floor(totalMinutes / 60)}H ${totalMinutes % 60}M`} label="Total Time" />
-            <MiniStat icon="locate" value={`${goalMet}%`} label="Goal Met" />
+            <MiniStat icon="time" value={formatDurationMinutes(totalMinutes * 60)} label="Total Time" />
+            <MiniStat icon="locate" value={goalMetLabel} label="Goal Met" />
           </View>
+
+          {isLoading && !dashboard ? (
+            <View style={styles.loadingRow}>
+              <ActivityIndicator color={colors.accent} />
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.statGrid}>
           <ProgressStatCard
             icon="scale"
             label="Weight"
-            value="68.4"
-            unit="kg"
-            detail="-0.8kg vs week"
-            onPress={() => router.push('/progress/weight' as Href)}
+            value={weightValue}
+            unit={weightUnit}
+            detail={formatSignedDelta(weightTrend.deltaDisplayValue, weightTrend.unitLabel)}
+            onPress={() =>
+              runWhenFocused(() => router.push('/progress/weight' as Href))
+            }
           />
           <ProgressStatCard
             icon="sparkles"
             label="XP Earned"
-            value="1820"
+            value="--"
             unit=""
-            detail="+320 vs last week"
-            onPress={() => router.push('/progress/xp' as Href)}
+            detail="Gamification not enabled yet"
+            onPress={() =>
+              runWhenFocused(() => router.push('/progress/xp' as Href))
+            }
           />
           <ProgressStatCard
             icon="flame"
             label="Streak"
-            value="9"
-            unit="days"
-            detail="Best: 14 days"
-            onPress={() => router.push('/progress/streak' as Href)}
+            value="--"
+            unit=""
+            detail="Streaks arrive with gamification"
+            onPress={() =>
+              runWhenFocused(() => router.push('/progress/streak' as Href))
+            }
             warning
           />
         </View>
@@ -210,7 +430,7 @@ export function ProgressScreen() {
             </View>
             <Pressable
               style={styles.legendRow}
-              onPress={() => setBodyFocus('primary')}
+              onPress={() => runWhenFocused(() => setBodyFocus('primary'))}
               accessibilityRole="button"
             >
               <View style={[styles.legendDot, bodyFocus === 'primary' && styles.legendDotActive]} />
@@ -218,20 +438,22 @@ export function ProgressScreen() {
                 numberOfLines={1}
                 style={[styles.legendText, bodyFocus === 'primary' && styles.legendTextActive]}
               >
-                Primary movers
+                {primaryMuscleLabel}
               </Text>
             </Pressable>
             <Pressable
               style={styles.legendRow}
-              onPress={() => setBodyFocus('secondary')}
+              onPress={() => runWhenFocused(() => setBodyFocus('secondary'))}
               accessibilityRole="button"
             >
-              <View style={[styles.legendDot, bodyFocus === 'secondary' && styles.legendDotActive]} />
+              <View
+                style={[styles.legendDot, bodyFocus === 'secondary' && styles.legendDotActive]}
+              />
               <Text
                 numberOfLines={1}
                 style={[styles.legendText, bodyFocus === 'secondary' && styles.legendTextActive]}
               >
-                Secondary movers
+                {secondaryMuscleLabel}
               </Text>
             </Pressable>
           </View>
@@ -243,7 +465,9 @@ export function ProgressScreen() {
 
           <Pressable
             style={styles.viewButton}
-            onPress={() => router.push('/progress/body-progress' as Href)}
+            onPress={() =>
+              runWhenFocused(() => router.push('/progress/body-progress' as Href))
+            }
             accessibilityRole="button"
           >
             <Text style={styles.viewButtonText}>View</Text>
@@ -255,38 +479,36 @@ export function ProgressScreen() {
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleRow}>
               <Ionicons name="trophy" size={18} color={colors.accent} />
-              <Text style={styles.sectionTitle}>Achievements</Text>
+              <Text style={styles.sectionTitle}>Personal Records</Text>
             </View>
             <Pressable
               style={styles.viewAllButton}
-              onPress={() => router.push('/progress/achievements' as Href)}
+              onPress={() =>
+                runWhenFocused(() =>
+                  router.push('/progress/personal-records' as Href),
+                )
+              }
               accessibilityRole="button"
             >
               <Text style={styles.viewAllText}>View All</Text>
-              <Ionicons
-                name="chevron-forward"
-                size={12}
-                color={colors.accent}
-              />
+              <Ionicons name="chevron-forward" size={12} color={colors.accent} />
             </Pressable>
           </View>
 
-          {showAllAchievements ? (
-            <View style={styles.achievementGrid}>
-              {achievementRows.map((row) => (
-                <View key={row.map((achievement) => achievement.title).join('-')} style={styles.achievementGridRow}>
-                  {row.map((achievement) => (
-                    <AchievementPill key={achievement.title} achievement={achievement} expanded />
-                  ))}
-                </View>
+          {visibleRecords.length > 0 ? (
+            <View style={styles.achievementRow}>
+              {visibleRecords.map((record) => (
+                <RecordPill
+                  key={`${record.exerciseId}-${record.recordType}`}
+                  record={record}
+                  preferredUnits={profile?.preferredUnits ?? null}
+                />
               ))}
             </View>
           ) : (
-            <View style={styles.achievementRow}>
-              {visibleAchievements.map((achievement) => (
-                <AchievementPill key={achievement.title} achievement={achievement} />
-              ))}
-            </View>
+            <Text style={styles.emptyText}>
+              Complete a workout and your best sets will show up here automatically.
+            </Text>
           )}
         </View>
       </ScrollView>
@@ -319,7 +541,14 @@ function ProgressRing({ score }: { score: number }) {
             />
           );
         })}
-        <Circle cx="59" cy="59" r="39" stroke="rgba(168,176,166,0.35)" strokeWidth="8" fill="rgba(13,13,13,0.2)" />
+        <Circle
+          cx="59"
+          cy="59"
+          r="39"
+          stroke="rgba(168,176,166,0.35)"
+          strokeWidth="8"
+          fill="rgba(13,13,13,0.2)"
+        />
         <Circle
           cx="59"
           cy="59"
@@ -340,7 +569,15 @@ function ProgressRing({ score }: { score: number }) {
   );
 }
 
-function MiniStat({ icon, value, label }: { icon: keyof typeof Ionicons.glyphMap; value: string; label: string }) {
+function MiniStat({
+  icon,
+  value,
+  label,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  value: string;
+  label: string;
+}) {
   return (
     <View style={styles.miniStat}>
       <Ionicons name={icon} size={18} color={colors.accent} />
@@ -377,14 +614,20 @@ function ProgressStatCard({
       accessibilityLabel={`Open ${label} details`}
     >
       <View style={styles.statLabelRow}>
-        <Ionicons name={icon} size={15} color={warning ? colors.warning : colors.accent} />
+        <Ionicons
+          name={icon}
+          size={15}
+          color={warning ? colors.warning : colors.accent}
+        />
         <Text style={styles.statLabel}>{label}</Text>
       </View>
       <View style={styles.statValueRow}>
         <Text style={styles.statValue}>{value}</Text>
         {unit ? <Text style={styles.statUnit}>{unit}</Text> : null}
       </View>
-      <Text style={[styles.statDetail, warning && styles.statDetailWarning]}>{detail}</Text>
+      <Text style={[styles.statDetail, warning && styles.statDetailWarning]}>
+        {detail}
+      </Text>
     </Pressable>
   );
 }
@@ -397,40 +640,38 @@ function BodyPlaceholder({ label, active }: { label: string; active: boolean }) 
         size={20}
         color={active ? colors.accent : colors.textSecondary}
       />
-      <Text style={[styles.bodyPlaceholderText, active && styles.bodyPlaceholderTextActive]}>
+      <Text
+        style={[styles.bodyPlaceholderText, active && styles.bodyPlaceholderTextActive]}
+      >
         {label}
       </Text>
     </View>
   );
 }
 
-function AchievementPill({
-  achievement,
-  expanded = false,
+function RecordPill({
+  record,
+  preferredUnits,
 }: {
-  achievement: (typeof achievements)[number];
-  expanded?: boolean;
+  record: PersonalRecord;
+  preferredUnits: 'metric' | 'imperial' | null;
 }) {
   return (
-    <View
-      style={[
-        styles.achievementPillBase,
-        expanded ? styles.achievementPillExpanded : styles.achievementPill,
-      ]}
-    >
+    <View style={[styles.achievementPillBase, styles.achievementPill]}>
       <View style={styles.achievementIcon}>
         <Ionicons
-          name={achievement.icon as keyof typeof Ionicons.glyphMap}
+          name={getRecordIcon(record.recordType)}
           size={16}
           color={colors.accent}
         />
       </View>
       <View style={styles.achievementTextBlock}>
         <Text style={styles.achievementTitle} numberOfLines={1}>
-          {achievement.title}
+          {record.exerciseName}
         </Text>
-        <Text style={styles.achievementDetail} numberOfLines={1}>
-          {achievement.detail}
+        <Text style={styles.achievementDetail} numberOfLines={2}>
+          {formatRecordTypeLabel(record.recordType)} ·{' '}
+          {formatRecordValue(record, preferredUnits)}
         </Text>
       </View>
     </View>
@@ -549,6 +790,23 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     transform: [{ skewX: '-10deg' }],
     width: 50,
+  },
+  statusCard: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  statusText: {
+    color: colors.textSecondary,
+    flex: 1,
+    fontSize: fontSize.caption,
+    fontWeight: '700',
   },
   activityCard: {
     backgroundColor: colors.surface,
@@ -719,6 +977,11 @@ const styles = StyleSheet.create({
     fontSize: 9,
     textAlign: 'center',
   },
+  loadingRow: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: spacing.sm,
+  },
   statGrid: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -885,13 +1148,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.sm,
   },
-  achievementGrid: {
-    gap: spacing.sm,
-  },
-  achievementGridRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
   achievementPillBase: {
     alignItems: 'center',
     borderColor: colors.border,
@@ -905,10 +1161,6 @@ const styles = StyleSheet.create({
   },
   achievementPill: {
     flex: 1,
-  },
-  achievementPillExpanded: {
-    flex: 1,
-    minHeight: 42,
   },
   achievementIcon: {
     alignItems: 'center',
@@ -931,5 +1183,10 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 8,
     fontWeight: '700',
+  },
+  emptyText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.caption,
+    lineHeight: 18,
   },
 });

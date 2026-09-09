@@ -1,8 +1,18 @@
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Href, useRouter } from 'expo-router';
 import { AppScreen } from '../components/AppScreen';
+import { getFitnessGoalLabel } from '../lib/profile/constants';
+import { useAuthProfile } from '../lib/profile/context';
+import { formatMeasurementSystem, getProfileDisplayName } from '../lib/profile/utils';
 import { colors, fontSize, radius, spacing } from '../theme';
 
 const PROFILE_ITEMS = [
@@ -27,6 +37,10 @@ const PROFILE_ITEMS = [
 
 export function ProfileScreen() {
   const router = useRouter();
+  const { profile, signOut, user } = useAuthProfile();
+  const displayName = getProfileDisplayName(profile, user?.email ?? null);
+  const goalLabel = getFitnessGoalLabel(profile?.fitnessGoal ?? null).toUpperCase();
+  const unitsLabel = formatMeasurementSystem(profile?.preferredUnits ?? null).toUpperCase();
 
   return (
     <AppScreen>
@@ -39,12 +53,12 @@ export function ProfileScreen() {
             <Ionicons name="person" size={44} color={colors.textPrimary} />
           </View>
           <View style={styles.profileText}>
-            <Text style={styles.name}>USER</Text>
-            <Text style={styles.level}>LEVEL 24</Text>
+            <Text style={styles.name}>{displayName.toUpperCase()}</Text>
+            <Text style={styles.level}>{unitsLabel}</Text>
             <View style={styles.progressTrack}>
-              <View style={styles.progressFill} />
+              <View style={[styles.progressFill, styles.progressFillComplete]} />
             </View>
-            <Text style={styles.tier}>FITNESS BUILDER TIER I</Text>
+            <Text style={styles.tier}>{goalLabel}</Text>
           </View>
         </View>
 
@@ -75,6 +89,16 @@ export function ProfileScreen() {
               styles.logout,
               pressed && styles.menuItemPressed,
             ]}
+            onPress={() => {
+              void signOut().catch((error) => {
+                Alert.alert(
+                  'Unable to Sign Out',
+                  error instanceof Error
+                    ? error.message
+                    : 'Please try again in a moment.',
+                );
+              });
+            }}
             accessibilityRole="button"
             accessibilityLabel="Log out"
           >
@@ -133,6 +157,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
     height: '100%',
     width: '58%',
+  },
+  progressFillComplete: {
+    width: '100%',
   },
   tier: {
     color: colors.accent,

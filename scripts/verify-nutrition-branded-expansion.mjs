@@ -238,7 +238,7 @@ async function loadCollisionStats(db) {
      select
        fb.barcode,
        count(distinct fb.food_id)::integer as food_count,
-       array_agg(distinct cf.name order by cf.name)[:3] as sample_food_names
+       (array_agg(distinct cf.name order by cf.name))[1:3] as sample_food_names
      from public.food_barcodes fb
      join duplicates d on d.barcode = fb.barcode
      join public.catalog_foods cf on cf.id = fb.food_id
@@ -275,21 +275,22 @@ async function loadBrandedSamples(db) {
 
 async function buildBrandedQueryChecks(db) {
   const samples = await loadBrandedSamples(db);
+  const checks = [];
 
-  return Promise.all(
-    samples.map(async (sample) => {
-      const productPhrase = sample.name.split(/\s+/).slice(0, 4).join(' ');
-      const brandProductQuery = `${sample.brand_name} ${productPhrase}`.trim();
+  for (const sample of samples) {
+    const productPhrase = sample.name.split(/\s+/).slice(0, 4).join(' ');
+    const brandProductQuery = `${sample.brand_name} ${productPhrase}`.trim();
 
-      return {
-        sample,
-        exactName: await runSearch(db, sample.name),
-        brandOnly: await runSearch(db, sample.brand_name),
-        brandPlusProduct: await runSearch(db, brandProductQuery),
-        typo: await runSearch(db, buildTypo(brandProductQuery)),
-      };
-    }),
-  );
+    checks.push({
+      sample,
+      exactName: await runSearch(db, sample.name),
+      brandOnly: await runSearch(db, sample.brand_name),
+      brandPlusProduct: await runSearch(db, brandProductQuery),
+      typo: await runSearch(db, buildTypo(brandProductQuery)),
+    });
+  }
+
+  return checks;
 }
 
 async function buildPhilippineCoverage(db) {
@@ -313,25 +314,14 @@ async function run() {
   await db.connect();
 
   try {
-    const [
-      countsBySource,
-      childCountsBySource,
-      storage,
-      collisionStats,
-      brandedChecks,
-      explainBanana,
-      explainKellogg,
-      philippineCoverage,
-    ] = await Promise.all([
-      loadCountsBySource(db),
-      loadChildCountsBySource(db),
-      loadStorageStats(db),
-      loadCollisionStats(db),
-      buildBrandedQueryChecks(db),
-      explainSearch(db, 'banana'),
-      explainSearch(db, 'kellogg'),
-      buildPhilippineCoverage(db),
-    ]);
+    const countsBySource = await loadCountsBySource(db);
+    const childCountsBySource = await loadChildCountsBySource(db);
+    const storage = await loadStorageStats(db);
+    const collisionStats = await loadCollisionStats(db);
+    const brandedChecks = await buildBrandedQueryChecks(db);
+    const explainBanana = await explainSearch(db, 'banana');
+    const explainKellogg = await explainSearch(db, 'kellogg');
+    const philippineCoverage = await buildPhilippineCoverage(db);
 
     const commonSearches = [];
 

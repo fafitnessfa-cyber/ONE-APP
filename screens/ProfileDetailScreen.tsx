@@ -1,8 +1,29 @@
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Href, useRouter } from 'expo-router';
 import { AppScreen } from '../components/AppScreen';
+import {
+  getExperienceLevelLabel,
+  getFitnessGoalLabel,
+  getWorkoutLocationLabel,
+} from '../lib/profile/constants';
+import { useAuthProfile } from '../lib/profile/context';
+import { sendPasswordResetEmail } from '../lib/profile/profile';
+import {
+  formatHeight,
+  formatMeasurementSystem,
+  formatTrainingDays,
+  formatWeight,
+  getProfileDisplayName,
+} from '../lib/profile/utils';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
 
 type DetailVariant =
@@ -19,6 +40,7 @@ interface InfoRow {
 }
 
 interface ActionRow {
+  id: string;
   title: string;
   subtitle: string;
   icon: keyof typeof Ionicons.glyphMap;
@@ -39,229 +61,355 @@ interface ProfileDetailContent {
   actions: ActionRow[];
 }
 
-const DETAIL_CONTENT: Record<DetailVariant, ProfileDetailContent> = {
-  'personal-information': {
-    eyebrow: 'PROFILE',
-    title: 'Personal Information',
-    subtitle: 'Your body, goal, and training baseline.',
-    icon: 'person',
-    summary:
-      'These details power workout difficulty, calorie estimates, progress tracking, and future AI recommendations.',
-    stats: [
-      { label: 'Level', value: '24' },
-      { label: 'Tier', value: 'Builder I' },
-      { label: 'Score', value: '742' },
-    ],
-    sections: [
-      {
-        title: 'Account Identity',
-        rows: [
-          { label: 'Display Name', value: 'User', icon: 'person-outline' },
-          { label: 'Email', value: 'user@oneup.app', icon: 'mail-outline' },
-          { label: 'Phone', value: '+1 555 010 2488', icon: 'call-outline' },
-        ],
-      },
-      {
-        title: 'Fitness Profile',
-        rows: [
-          { label: 'Age', value: '34', icon: 'calendar-outline' },
-          { label: 'Height', value: '178 cm', icon: 'resize-outline' },
-          { label: 'Weight', value: '68.4 kg', icon: 'scale-outline' },
-          { label: 'Primary Goal', value: 'Build lean strength', icon: 'flag-outline' },
-        ],
-      },
-    ],
-    actions: [
-      {
-        title: 'Edit Personal Details',
-        subtitle: 'Update identity, body metrics, and training goal.',
-        icon: 'create-outline',
-      },
-      {
-        title: 'Update Profile Photo',
-        subtitle: 'Replace the avatar used across ONE UP.',
-        icon: 'camera-outline',
-      },
-    ],
-  },
-  'account-settings': {
-    eyebrow: 'SECURITY',
-    title: 'Account Settings',
-    subtitle: 'Login, privacy, and account protection.',
-    icon: 'shield-checkmark',
-    summary:
-      'Keep the account secure with password recovery, privacy controls, and connected sign-in options.',
-    stats: [
-      { label: 'Status', value: 'Verified' },
-      { label: 'Login', value: 'Email' },
-      { label: '2FA', value: 'Planned' },
-    ],
-    sections: [
-      {
-        title: 'Login Access',
-        rows: [
-          { label: 'Email Login', value: 'Enabled', icon: 'mail-outline' },
-          { label: 'Password', value: 'Last changed 32 days ago', icon: 'key-outline' },
-          { label: 'Apple Sign In', value: 'Ready for setup', icon: 'logo-apple' },
-          { label: 'Google Sign In', value: 'Ready for setup', icon: 'logo-google' },
-        ],
-      },
-      {
-        title: 'Privacy Controls',
-        rows: [
-          { label: 'Profile Visibility', value: 'Private', icon: 'eye-off-outline' },
-          { label: 'Leaderboard Name', value: 'User', icon: 'trophy-outline' },
-          { label: 'Data Export', value: 'Available on request', icon: 'download-outline' },
-        ],
-      },
-    ],
-    actions: [
-      {
-        title: 'Change Password',
-        subtitle: 'Send a secure reset flow to the registered email.',
-        icon: 'lock-closed-outline',
-      },
-      {
-        title: 'Delete Account',
-        subtitle: 'Request permanent removal of profile and history.',
-        icon: 'trash-outline',
-        accent: 'red',
-      },
-    ],
-  },
-  'plan-subscription': {
-    eyebrow: 'MEMBERSHIP',
-    title: 'Plan & Subscription',
-    subtitle: 'Premium access, billing, and unlocks.',
-    icon: 'card',
-    summary:
-      'This area will manage premium access, billing status, and member-only feature unlocks.',
-    stats: [
-      { label: 'Plan', value: 'Free' },
-      { label: 'Trial', value: 'Not started' },
-      { label: 'Premium', value: 'Locked' },
-    ],
-    sections: [
-      {
-        title: 'Current Plan',
-        rows: [
-          { label: 'Membership', value: 'ONE UP Free', icon: 'id-card-outline' },
-          { label: 'Renewal', value: 'No active billing', icon: 'refresh-outline' },
-          { label: 'Entitlements', value: 'Basic workout tools', icon: 'star-outline' },
-        ],
-      },
-      {
-        title: 'Premium Preview',
-        rows: [
-          { label: 'AI Meal Suggestions', value: 'Premium planned', icon: 'sparkles-outline' },
-          { label: 'Advanced Analytics', value: 'Premium planned', icon: 'analytics-outline' },
-          { label: 'Custom Programs', value: 'Premium planned', icon: 'barbell-outline' },
-        ],
-      },
-    ],
-    actions: [
-      {
-        title: 'View Upgrade Options',
-        subtitle: 'Compare premium benefits before connecting payments.',
-        icon: 'arrow-up-circle-outline',
-      },
-      {
-        title: 'Restore Purchases',
-        subtitle: 'Use later when App Store and Play billing are active.',
-        icon: 'cloud-download-outline',
-      },
-    ],
-  },
-  settings: {
-    eyebrow: 'PREFERENCES',
-    title: 'Settings',
-    subtitle: 'Units, notifications, and app behavior.',
-    icon: 'settings',
-    summary:
-      'These settings give users control over how ONE UP tracks progress and sends training reminders.',
-    stats: [
-      { label: 'Units', value: 'Metric' },
-      { label: 'Alerts', value: 'On' },
-      { label: 'Theme', value: 'Dark' },
-    ],
-    sections: [
-      {
-        title: 'Training Preferences',
-        rows: [
-          { label: 'Measurement Units', value: 'Metric - kg, cm, liters', icon: 'options-outline' },
-          { label: 'Workout Reminders', value: 'Weekdays at 7:00 AM', icon: 'alarm-outline' },
-          { label: 'Rest Timer Sound', value: 'Enabled', icon: 'volume-high-outline' },
-          { label: 'Weekly Summary', value: 'Every Sunday', icon: 'calendar-number-outline' },
-        ],
-      },
-      {
-        title: 'App Experience',
-        rows: [
-          { label: 'Theme', value: 'Dark first', icon: 'moon-outline' },
-          { label: 'Haptics', value: 'Enabled', icon: 'phone-portrait-outline' },
-          { label: 'Language', value: 'English', icon: 'language-outline' },
-        ],
-      },
-    ],
-    actions: [
-      {
-        title: 'Manage Notifications',
-        subtitle: 'Choose which reminders and streak alerts are sent.',
-        icon: 'notifications-outline',
-      },
-      {
-        title: 'Reset App Preferences',
-        subtitle: 'Return units and reminders to default settings.',
-        icon: 'reload-outline',
-        accent: 'orange',
-      },
-    ],
-  },
-  'help-support': {
-    eyebrow: 'SUPPORT',
-    title: 'Help & Support',
-    subtitle: 'Guides, contact, and app policies.',
-    icon: 'help-circle',
-    summary:
-      'A support center keeps users confident while the app grows into real billing, nutrition, and AI features.',
-    stats: [
-      { label: 'Status', value: 'Online' },
-      { label: 'Reply', value: '24-48h' },
-      { label: 'Version', value: '1.0.0' },
-    ],
-    sections: [
-      {
-        title: 'Support Topics',
-        rows: [
-          { label: 'Getting Started', value: 'Workout, nutrition, and progress basics', icon: 'map-outline' },
-          { label: 'Subscription Help', value: 'Billing, plans, and restore purchases', icon: 'card-outline' },
-          { label: 'Report a Bug', value: 'Send device and app details', icon: 'bug-outline' },
-          { label: 'Contact Support', value: 'support@oneup.app', icon: 'chatbubble-ellipses-outline' },
-        ],
-      },
-      {
-        title: 'Legal',
-        rows: [
-          { label: 'Terms of Service', value: 'Ready for final legal copy', icon: 'document-text-outline' },
-          { label: 'Privacy Policy', value: 'Ready for final legal copy', icon: 'shield-outline' },
-          { label: 'Health Disclaimer', value: 'Required before launch', icon: 'medical-outline' },
-        ],
-      },
-    ],
-    actions: [
-      {
-        title: 'Open Help Center',
-        subtitle: 'Browse common questions and app guides.',
-        icon: 'book-outline',
-      },
-      {
-        title: 'Send Support Request',
-        subtitle: 'Create a ticket for account or app issues.',
-        icon: 'send-outline',
-      },
-    ],
-  },
-};
+function createDetailContent({
+  displayName,
+  emailAddress,
+  isAnonymous,
+  preferredUnitsLabel,
+  profile,
+}: {
+  displayName: string;
+  emailAddress: string;
+  isAnonymous: boolean;
+  preferredUnitsLabel: string;
+  profile: ReturnType<typeof useAuthProfile>['profile'];
+}): Record<DetailVariant, ProfileDetailContent> {
+  return {
+    'personal-information': {
+      eyebrow: 'PROFILE',
+      title: 'Personal Information',
+      subtitle: 'Your body, goal, and training baseline.',
+      icon: 'person',
+      summary:
+        'These private details now live in Supabase and will feed future workout recommendations, progress targets, and coaching.',
+      stats: [
+        {
+          label: 'Status',
+          value: profile?.onboardingCompleted ? 'Ready' : 'Pending',
+        },
+        { label: 'Goal', value: getFitnessGoalLabel(profile?.fitnessGoal ?? null) },
+        { label: 'Units', value: preferredUnitsLabel },
+      ],
+      sections: [
+        {
+          title: 'Account Identity',
+          rows: [
+            { label: 'Display Name', value: displayName, icon: 'person-outline' },
+            { label: 'Email', value: emailAddress, icon: 'mail-outline' },
+            {
+              label: 'Phone',
+              value: profile?.phoneNumber ?? 'Not set',
+              icon: 'call-outline',
+            },
+          ],
+        },
+        {
+          title: 'Fitness Profile',
+          rows: [
+            {
+              label: 'Age',
+              value: profile?.ageYears == null ? 'Not set' : String(profile.ageYears),
+              icon: 'calendar-outline',
+            },
+            {
+              label: 'Height',
+              value: formatHeight(profile?.heightCm ?? null, profile?.preferredUnits ?? null),
+              icon: 'resize-outline',
+            },
+            {
+              label: 'Weight',
+              value: formatWeight(
+                profile?.currentWeightKg ?? null,
+                profile?.preferredUnits ?? null,
+              ),
+              icon: 'scale-outline',
+            },
+            {
+              label: 'Primary Goal',
+              value: getFitnessGoalLabel(profile?.fitnessGoal ?? null),
+              icon: 'flag-outline',
+            },
+          ],
+        },
+      ],
+      actions: [
+        {
+          id: 'edit-personal',
+          title: 'Edit Personal Details',
+          subtitle: 'Update identity, body metrics, and training goal.',
+          icon: 'create-outline',
+        },
+        {
+          id: 'edit-preferences',
+          title: 'Edit Preferences',
+          subtitle: 'Adjust units and training preferences without repeating onboarding.',
+          icon: 'options-outline',
+        },
+      ],
+    },
+    'account-settings': {
+      eyebrow: 'SECURITY',
+      title: 'Account Settings',
+      subtitle: 'Login, privacy, and account protection.',
+      icon: 'shield-checkmark',
+      summary:
+        'The account remains private. Profile ownership is always derived from the authenticated Supabase session and protected with RLS.',
+      stats: [
+        {
+          label: 'Status',
+          value: isAnonymous ? 'Guest' : 'Private',
+        },
+        {
+          label: 'Login',
+          value: isAnonymous ? 'Guest' : 'Email',
+        },
+        {
+          label: 'Access',
+          value: 'Private',
+        },
+      ],
+      sections: [
+        {
+          title: 'Login Access',
+          rows: [
+            {
+              label: 'Account Type',
+              value: isAnonymous ? 'Anonymous guest session' : 'Email account',
+              icon: 'person-circle-outline',
+            },
+            {
+              label: 'Email',
+              value: emailAddress,
+              icon: 'mail-outline',
+            },
+            {
+              label: 'Password Reset',
+              value: isAnonymous ? 'Unavailable for guests' : 'Send by email',
+              icon: 'key-outline',
+            },
+          ],
+        },
+        {
+          title: 'Privacy Controls',
+          rows: [
+            {
+              label: 'Profile Visibility',
+              value: 'Private',
+              icon: 'eye-off-outline',
+            },
+            {
+              label: 'Profile Ownership',
+              value: 'Bound to auth.uid()',
+              icon: 'shield-outline',
+            },
+            {
+              label: 'RLS',
+              value: 'Own row only',
+              icon: 'lock-closed-outline',
+            },
+          ],
+        },
+      ],
+      actions: [
+        ...(isAnonymous
+          ? [
+              {
+                id: 'upgrade-account',
+                title: 'Secure Guest Account',
+                subtitle:
+                  'Link this guest profile to an email login without losing any existing data.',
+                icon: 'shield-checkmark-outline' as const,
+              },
+            ]
+          : [
+              {
+                id: 'password-reset',
+                title: 'Change Password',
+                subtitle: 'Send a secure reset flow to the registered email.',
+                icon: 'lock-closed-outline' as const,
+              },
+            ]),
+        {
+          id: 'sign-out',
+          title: 'Sign Out',
+          subtitle: 'End this session and return to account access.',
+          icon: 'log-out-outline',
+          accent: 'orange',
+        },
+      ],
+    },
+    'plan-subscription': {
+      eyebrow: 'MEMBERSHIP',
+      title: 'Plan & Subscription',
+      subtitle: 'Premium access, billing, and unlocks.',
+      icon: 'card',
+      summary:
+        'Subscription controls are still future work, so this screen remains informational while the profile foundation ships first.',
+      stats: [
+        { label: 'Plan', value: 'Free' },
+        { label: 'Trial', value: 'Not started' },
+        { label: 'Premium', value: 'Locked' },
+      ],
+      sections: [
+        {
+          title: 'Current Plan',
+          rows: [
+            { label: 'Membership', value: 'ONE UP Free', icon: 'id-card-outline' },
+            { label: 'Renewal', value: 'No active billing', icon: 'refresh-outline' },
+            { label: 'Entitlements', value: 'Basic workout tools', icon: 'star-outline' },
+          ],
+        },
+        {
+          title: 'Premium Preview',
+          rows: [
+            { label: 'AI Meal Suggestions', value: 'Premium planned', icon: 'sparkles-outline' },
+            { label: 'Advanced Analytics', value: 'Premium planned', icon: 'analytics-outline' },
+            { label: 'Custom Programs', value: 'Premium planned', icon: 'barbell-outline' },
+          ],
+        },
+      ],
+      actions: [
+        {
+          id: 'coming-soon-plan',
+          title: 'View Upgrade Options',
+          subtitle: 'Compare premium benefits before connecting payments.',
+          icon: 'arrow-up-circle-outline',
+        },
+        {
+          id: 'coming-soon-restore',
+          title: 'Restore Purchases',
+          subtitle: 'Use later when App Store and Play billing are active.',
+          icon: 'cloud-download-outline',
+        },
+      ],
+    },
+    settings: {
+      eyebrow: 'PREFERENCES',
+      title: 'Settings',
+      subtitle: 'Units, notifications, and app behavior.',
+      icon: 'settings',
+      summary:
+        'Profile preferences are now persisted. Notification and broader app-experience controls still remain placeholder UI for a later stage.',
+      stats: [
+        { label: 'Units', value: preferredUnitsLabel },
+        {
+          label: 'Days/Wk',
+          value:
+            profile?.preferredTrainingDaysPerWeek == null
+              ? 'Not set'
+              : String(profile.preferredTrainingDaysPerWeek),
+        },
+        {
+          label: 'Location',
+          value: getWorkoutLocationLabel(profile?.preferredWorkoutLocation ?? null),
+        },
+      ],
+      sections: [
+        {
+          title: 'Training Preferences',
+          rows: [
+            {
+              label: 'Measurement Units',
+              value: formatMeasurementSystem(profile?.preferredUnits ?? null),
+              icon: 'options-outline',
+            },
+            {
+              label: 'Experience Level',
+              value: getExperienceLevelLabel(profile?.experienceLevel ?? null),
+              icon: 'barbell-outline',
+            },
+            {
+              label: 'Training Days / Week',
+              value:
+                profile?.preferredTrainingDaysPerWeek == null
+                  ? 'Not set'
+                  : String(profile.preferredTrainingDaysPerWeek),
+              icon: 'calendar-number-outline',
+            },
+            {
+              label: 'Preferred Days',
+              value: formatTrainingDays(profile?.preferredTrainingDays ?? []),
+              icon: 'calendar-outline',
+            },
+            {
+              label: 'Workout Location',
+              value: getWorkoutLocationLabel(profile?.preferredWorkoutLocation ?? null),
+              icon: 'home-outline',
+            },
+          ],
+        },
+        {
+          title: 'App Experience',
+          rows: [
+            { label: 'Theme', value: 'Dark first', icon: 'moon-outline' },
+            { label: 'Haptics', value: 'Enabled', icon: 'phone-portrait-outline' },
+            { label: 'Language', value: 'English', icon: 'language-outline' },
+          ],
+        },
+      ],
+      actions: [
+        {
+          id: 'edit-preferences',
+          title: 'Edit Preferences',
+          subtitle: 'Update units, training frequency, and workout location.',
+          icon: 'create-outline',
+        },
+        {
+          id: 'coming-soon-notifications',
+          title: 'Manage Notifications',
+          subtitle: 'Reminder controls stay in placeholder mode for now.',
+          icon: 'notifications-outline',
+        },
+      ],
+    },
+    'help-support': {
+      eyebrow: 'SUPPORT',
+      title: 'Help & Support',
+      subtitle: 'Guides, contact, and app policies.',
+      icon: 'help-circle',
+      summary:
+        'Support UI remains informational for now while the profile and onboarding foundation takes priority.',
+      stats: [
+        { label: 'Status', value: 'Online' },
+        { label: 'Reply', value: '24-48h' },
+        { label: 'Version', value: '1.0.0' },
+      ],
+      sections: [
+        {
+          title: 'Support Topics',
+          rows: [
+            { label: 'Getting Started', value: 'Workout, nutrition, and progress basics', icon: 'map-outline' },
+            { label: 'Subscription Help', value: 'Billing, plans, and restore purchases', icon: 'card-outline' },
+            { label: 'Report a Bug', value: 'Send device and app details', icon: 'bug-outline' },
+            { label: 'Contact Support', value: 'support@oneup.app', icon: 'chatbubble-ellipses-outline' },
+          ],
+        },
+        {
+          title: 'Legal',
+          rows: [
+            { label: 'Terms of Service', value: 'Ready for final legal copy', icon: 'document-text-outline' },
+            { label: 'Privacy Policy', value: 'Ready for final legal copy', icon: 'shield-outline' },
+            { label: 'Health Disclaimer', value: 'Required before launch', icon: 'medical-outline' },
+          ],
+        },
+      ],
+      actions: [
+        {
+          id: 'coming-soon-help-center',
+          title: 'Open Help Center',
+          subtitle: 'Browse common questions and app guides.',
+          icon: 'book-outline',
+        },
+        {
+          id: 'coming-soon-support-request',
+          title: 'Send Support Request',
+          subtitle: 'Create a ticket for account or app issues.',
+          icon: 'send-outline',
+        },
+      ],
+    },
+  };
+}
 
 interface ProfileDetailScreenProps {
   variant: DetailVariant;
@@ -269,7 +417,77 @@ interface ProfileDetailScreenProps {
 
 export function ProfileDetailScreen({ variant }: ProfileDetailScreenProps) {
   const router = useRouter();
-  const content = DETAIL_CONTENT[variant];
+  const { isAnonymous, profile, signOut, user } = useAuthProfile();
+  const displayName = getProfileDisplayName(profile, user?.email ?? null);
+  const emailAddress = user?.email ?? 'Guest session';
+  const preferredUnitsLabel =
+    profile?.preferredUnits === 'imperial'
+      ? 'Imperial'
+      : profile?.preferredUnits === 'metric'
+        ? 'Metric'
+        : 'Not set';
+  const content = createDetailContent({
+    displayName,
+    emailAddress,
+    isAnonymous,
+    preferredUnitsLabel,
+    profile,
+  })[variant];
+
+  async function handleActionPress(action: ActionRow) {
+    switch (action.id) {
+      case 'edit-personal':
+        router.push('/profile/edit-personal' as Href);
+        return;
+      case 'edit-preferences':
+        router.push('/profile/edit-preferences' as Href);
+        return;
+      case 'upgrade-account':
+        router.push('/profile/upgrade-account' as Href);
+        return;
+      case 'password-reset':
+        if (!user?.email) {
+          Alert.alert(
+            'Unavailable',
+            'Password reset is only available for email accounts.',
+          );
+          return;
+        }
+
+        try {
+          await sendPasswordResetEmail(user.email);
+          Alert.alert(
+            'Password Reset Sent',
+            'Check your email for the secure reset link.',
+          );
+        } catch (error) {
+          Alert.alert(
+            'Unable to Send Reset',
+            error instanceof Error
+              ? error.message
+              : 'Please try again in a moment.',
+          );
+        }
+        return;
+      case 'sign-out':
+        try {
+          await signOut();
+        } catch (error) {
+          Alert.alert(
+            'Unable to Sign Out',
+            error instanceof Error
+              ? error.message
+              : 'Please try again in a moment.',
+          );
+        }
+        return;
+      default:
+        Alert.alert(
+          'Coming Soon',
+          'This area remains informational while profile persistence is being finalized.',
+        );
+    }
+  }
 
   return (
     <AppScreen>
@@ -362,6 +580,9 @@ export function ProfileDetailScreen({ variant }: ProfileDetailScreenProps) {
                   styles.actionRow,
                   pressed && styles.pressed,
                 ]}
+                onPress={() => {
+                  void handleActionPress(action);
+                }}
                 accessibilityRole="button"
                 accessibilityLabel={action.title}
               >

@@ -2,11 +2,15 @@ import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { useAuthProfile } from '../lib/profile/context';
+import { getProfileInitial } from '../lib/profile/utils';
 import { LogoMark, LogoWordmark } from './BrandLogo';
 import { colors, fontSize, spacing } from '../theme';
 
 export function Header() {
   const router = useRouter();
+  const { profile, user } = useAuthProfile();
+  const avatarInitial = getProfileInitial(profile, user?.email ?? null);
 
   return (
     <View style={styles.container}>
@@ -30,7 +34,7 @@ export function Header() {
           accessibilityLabel="Open profile"
         >
           <Text allowFontScaling={false} style={styles.avatarText}>
-            U
+            {avatarInitial}
           </Text>
         </Pressable>
       </View>

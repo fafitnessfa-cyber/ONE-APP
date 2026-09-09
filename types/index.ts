@@ -3,16 +3,56 @@
 
 export interface Exercise {
   id: string;
+  slug: string;
   name: string;
   type: string;
   muscles: string[];
+  primaryMuscles: string[];
+  secondaryMuscles: string[];
+  muscleGroups: string[];
+  bodyRegions: string[];
+  equipment: string[];
+  equipmentCodes: string[];
   tags: string[];
+  description?: string;
+  instructions: string[];
+  exerciseType: 'strength' | 'cardio' | 'mobility';
+  movementPattern: string | null;
+  mechanic: string | null;
+  difficulty: 'beginner' | 'intermediate' | 'advanced' | null;
+  laterality: 'bilateral' | 'unilateral' | 'alternating' | null;
+  primaryTrackingMetric: string;
+  loadType: string;
+  programFocuses: string[];
+  aliases: string[];
   image?: string;
 }
 
+export type ExerciseFilterTagId =
+  | 'all'
+  | 'chest'
+  | 'legs'
+  | 'hypertrophy'
+  | 'barbell'
+  | 'upper'
+  | 'back'
+  | 'shoulders'
+  | 'arms'
+  | 'core';
+
 export interface FilterTag {
-  id: string;
+  id: ExerciseFilterTagId;
   label: string;
+}
+
+export interface ExerciseSearchFilters {
+  muscleGroups?: string[];
+  bodyRegions?: string[];
+  equipmentCodes?: string[];
+  exerciseTypes?: Exercise['exerciseType'][];
+  difficultyLevels?: NonNullable<Exercise['difficulty']>[];
+  movementPatterns?: string[];
+  programFocuses?: string[];
 }
 
 export type NutritionDayId = 'yesterday' | 'today' | 'tomorrow';
@@ -166,4 +206,45 @@ export interface NutritionDay {
   hydrationGoalLiters: number;
   macroGoals: NutritionMacroGoals;
   meals: NutritionMeal[];
+}
+
+export type ProfileFitnessGoal =
+  | 'lose_weight'
+  | 'build_muscle'
+  | 'maintain'
+  | 'improve_strength'
+  | 'improve_fitness';
+export type ProfileExperienceLevel =
+  | 'beginner'
+  | 'intermediate'
+  | 'advanced';
+export type ProfileWorkoutLocation = 'home' | 'gym' | 'both';
+export type ProfileUnitPreference = 'metric' | 'imperial';
+export type ProfileWeekday =
+  | 'monday'
+  | 'tuesday'
+  | 'wednesday'
+  | 'thursday'
+  | 'friday'
+  | 'saturday'
+  | 'sunday';
+
+export interface UserProfile {
+  id: string;
+  displayName: string | null;
+  phoneNumber: string | null;
+  ageYears: number | null;
+  heightCm: number | null;
+  currentWeightKg: number | null;
+  targetWeightKg: number | null;
+  fitnessGoal: ProfileFitnessGoal | null;
+  experienceLevel: ProfileExperienceLevel | null;
+  preferredTrainingDaysPerWeek: number | null;
+  preferredTrainingDays: ProfileWeekday[];
+  preferredWorkoutLocation: ProfileWorkoutLocation | null;
+  preferredUnits: ProfileUnitPreference | null;
+  onboardingCompleted: boolean;
+  onboardingCompletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }

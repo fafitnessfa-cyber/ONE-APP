@@ -4,6 +4,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { Href, useRouter } from 'expo-router';
 import Svg, { Circle, Line } from 'react-native-svg';
 import { AppScreen } from '../components/AppScreen';
+import { useAuthProfile } from '../lib/profile/context';
+import { getProfileDisplayName } from '../lib/profile/utils';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
 
 const workoutMoves = [
@@ -40,6 +42,8 @@ const recoveryMarkers = [
 export function HomeScreen() {
   const router = useRouter();
   const [activeTool, setActiveTool] = React.useState('Muscle\nExplorer');
+  const { profile, user } = useAuthProfile();
+  const displayName = getProfileDisplayName(profile, user?.email ?? null);
 
   return (
     <AppScreen>
@@ -49,7 +53,7 @@ export function HomeScreen() {
       >
         <View style={styles.titleRow}>
           <View style={styles.titleCopy}>
-            <Text style={styles.title}>Good Morning, User</Text>
+            <Text style={styles.title}>Good Morning, {displayName}</Text>
             <Text style={styles.subtitle}>Ready to Level UP Today?</Text>
           </View>
           <LevelPill />
